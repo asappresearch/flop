@@ -35,8 +35,6 @@ setup(
     version=os.environ.get("TAG_VERSION", VERSION['VERSION']),
 
     description=DESCRIPTION,
-    long_description=readme(),
-    long_description_content_type="text/x-rst; charset=UTF-8",
 
     # Author information
     author=AUTHOR,
