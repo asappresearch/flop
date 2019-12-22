@@ -1,6 +1,6 @@
 # FLOP
 
-Pytorch Library offering L0 based pruning, as proposed in the paper:
+Pytorch Library for L0 based pruning, as proposed in the paper:
 [Structured Pruning of Large Language Models](https://arxiv.org/abs/1910.04732)
 
 ## Install
