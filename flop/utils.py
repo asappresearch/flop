@@ -67,12 +67,12 @@ def make_hard_concrete(module: nn.Module,
         if isinstance(child, ProjectedLinear):
             modules.append((name, child))
         else:
-            make_hard_concrete(module, in_place)
+            make_hard_concrete(child, in_place)
 
     # Replace all modules found
     new_module = module if in_place else deepcopy(module)
     for name, child in modules:
-        new_child = HardConcreteProjectedLinear.from_module(child, init_mean, init_mean)
+        new_child = HardConcreteProjectedLinear.from_module(child, init_mean, init_std)
         delattr(new_module, name)
         setattr(new_module, name, new_child)
 

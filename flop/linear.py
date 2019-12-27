@@ -5,11 +5,12 @@ import math
 
 import torch
 import torch.nn as nn
+from flambe.nn import Module
 
 from .hardconcrete import HardConcrete
 
 
-class ProjectedLinear(nn.Module):
+class ProjectedLinear(Module):
     """Linear layer with an internal projection."""
 
     def __init__(self,
@@ -103,7 +104,7 @@ class ProjectedLinear(nn.Module):
             return self.linear2(self.linear1(data))
 
 
-class HardConcreteProjectedLinear(nn.Module):
+class HardConcreteProjectedLinear(Module):
     """The hard concrete equivalent of ``ProjectedLinear``."""
 
     def __init__(self,
@@ -201,8 +202,8 @@ class HardConcreteProjectedLinear(nn.Module):
                          proj_features)
 
         if keep_weights:
-            new_module.weight.data = module.linear1.weight.data
-            new_module.weight_proj.data = module.linear2.weight.data
+            new_module.weight.data = module.linear1.weight.data.transpose(0, 1)
+            new_module.weight_proj.data = module.linear2.weight.data.transpose(0, 1)
             if bias:
                 new_module.bias.data = module.linear2.bias.data
 
@@ -226,7 +227,7 @@ class HardConcreteProjectedLinear(nn.Module):
     def num_parameters(self, train=True) -> torch.Tensor:
         """Get number of parameters."""
         bias = len(self.bias) if self.bias is not None else 0  # type: ignore
-        params = torch.tensor(bias)
+        params = torch.tensor(bias, dtype=torch.float)
         if train:
             n_proj = self.mask.l0_norm()
             params += self.in_features * n_proj + self.out_features * n_proj
@@ -266,15 +267,15 @@ class HardConcreteProjectedLinear(nn.Module):
 
                 # Compute new subweight
                 if len(indices) > 0:  # type: ignore
-                    self.compiled_weight = self.weight.index_select(1, self.indices)  # type: ignore
+                    self.compiled_weight = self.weight.index_select(1, indices)  # type: ignore
                     weight_proj = self.weight_proj * mask.view(-1, 1)
-                    self.compiled_weight_proj = weight_proj.index_select(0, self.indices)
+                    self.compiled_weight_proj = weight_proj.index_select(0, indices)
                 else:
                     self.compiled_weight = -1  # type: ignore
                     self.compiled_weight_proj = -1  # type: ignore
 
                 # Use the precompued sub weight
-            if self.compiled_weight == -1:
+            if (self.compiled_weight == -1).all():
                 output_size = data.size()[:-1] + (self.out_features,)
                 U = data.new(size=output_size).zero_()  # type: ignore
             else:
