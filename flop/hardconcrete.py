@@ -60,6 +60,7 @@ class HardConcrete(nn.Module):
         self.init_mean = init_mean
         self.init_std = init_std
         self.bias = -self.beta * math.log(-self.limit_l / self.limit_r)
+        #self.bias = -self.beta * (math.log(-self.limit_l) - math.log(self.limit_r))
 
         self.eps = eps
         self.compiled_mask = None
@@ -97,6 +98,7 @@ class HardConcrete(nn.Module):
             # Sample mask dynamically
             u = self.log_alpha.new(self.n_in).uniform_(self.eps, 1 - self.eps)  # type: ignore
             s = F.sigmoid((torch.log(u / (1 - u)) + self.log_alpha) / self.beta)
+            #s = F.sigmoid((torch.log(u) - torch.log(1-u) + self.log_alpha) / self.beta)
             s = s * (self.limit_r - self.limit_l) + self.limit_l
             mask = s.clamp(min=0., max=1.)
 
@@ -108,7 +110,7 @@ class HardConcrete(nn.Module):
                 num_zeros = round(expected_num_zeros)
                 # Approximate expected value of each mask variable z;
                 # We use an empirically validated magic number 0.8
-                soft_mask = F.sigmoid(self.log_alpha * 0.8)
+                soft_mask = F.sigmoid(self.log_alpha / self.beta * 0.8)
                 # Prune small values to set to 0
                 _, indices = torch.topk(soft_mask, k=num_zeros, largest=False)
                 soft_mask[indices] = 0.
