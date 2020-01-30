@@ -14,7 +14,6 @@ from tensorboardX import SummaryWriter
 
 import sru
 import flop
-#from flambe.optim import RAdam
 
 def read_corpus(path, num_test_symbols=5000000):
     raw_data = open(path).read()
@@ -57,8 +56,6 @@ class Model(nn.Module):
             ))
         self.rnn = sru.SRU(self.n_e, self.n_d, self.depth,
             dropout = args.dropout,
-            #projection_size = args.n_proj,
-            #use_tanh = 0,
             highway_bias = args.bias,
             layer_norm = args.layer_norm,
             rescale = args.rescale,
@@ -68,7 +65,6 @@ class Model(nn.Module):
         self.init_weights()
 
     def init_weights(self, reinit_rnn=False):
-        #val_range = val_range or (3.0/self.n_d)**0.5
         params = list(self.embedding_layer.parameters()) + list(self.output_layer.parameters())
         for p in params:
             if p.dim() > 1:  # matrix
@@ -383,8 +379,6 @@ if __name__ == "__main__":
     argparser.add_argument("--prune_lr", type=float, default=3)
     argparser.add_argument("--prune_warmup", type=int, default=0)
     argparser.add_argument("--prune_sparsity", type=float, default=0.)
-#    argparser.add_argument("--prune_stretch", type=float, default=0.1)
-#    argparser.add_argument("--prune_mean", type=float, default=0.5)
     argparser.add_argument("--prune_start_epoch", type=int, default=0)
 
     args = argparser.parse_args()

@@ -168,7 +168,6 @@ class HardConcreteProjectedLinear(Module):
             self.register_parameter('bias', None)  # type: ignore
 
         self.indices = None
-        #self.compiled_mask = None
         self.compiled_weight = None
         self.compiled_weight_proj = None
         self.reset_parameters()
@@ -353,7 +352,6 @@ class HardConcreteLinear(Module):
             self.register_parameter('bias', None)  # type: ignore
 
         self.indices = None
-        #self.compiled_mask = None
         self.compiled_weight = None
         self.reset_parameters()
 

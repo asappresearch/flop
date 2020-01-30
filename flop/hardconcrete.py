@@ -60,7 +60,6 @@ class HardConcrete(nn.Module):
         self.init_mean = init_mean
         self.init_std = init_std
         self.bias = -self.beta * math.log(-self.limit_l / self.limit_r)
-        #self.bias = -self.beta * (math.log(-self.limit_l) - math.log(self.limit_r))
 
         self.eps = eps
         self.compiled_mask = None
@@ -98,7 +97,6 @@ class HardConcrete(nn.Module):
             # Sample mask dynamically
             u = self.log_alpha.new(self.n_in).uniform_(self.eps, 1 - self.eps)  # type: ignore
             s = F.sigmoid((torch.log(u / (1 - u)) + self.log_alpha) / self.beta)
-            #s = F.sigmoid((torch.log(u) - torch.log(1-u) + self.log_alpha) / self.beta)
             s = s * (self.limit_r - self.limit_l) + self.limit_l
             mask = s.clamp(min=0., max=1.)
 
