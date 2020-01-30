@@ -5,7 +5,7 @@ import torch.nn as nn
 
 from flambe.logging import log_histogram
 from flop.hardconcrete import HardConcrete
-from flop.linear import ProjectedLinear, HardConcreteProjectedLinear
+from flop.linear import ProjectedLinear, HardConcreteProjectedLinear, HardConcreteLinear
 
 
 def make_projected_linear(module: nn.Module, in_place: bool = True) -> nn.Module:
@@ -66,17 +66,47 @@ def make_hard_concrete(module: nn.Module,
     for name, child in module.named_children():
         if isinstance(child, ProjectedLinear):
             modules.append((name, child))
+        elif isinstance(child, nn.Linear):
+            modules.append((name, child))
         else:
             make_hard_concrete(child, in_place)
 
     # Replace all modules found
     new_module = module if in_place else deepcopy(module)
     for name, child in modules:
-        new_child = HardConcreteProjectedLinear.from_module(child, init_mean, init_std)
+        if isinstance(child, ProjectedLinear):
+            new_child = HardConcreteProjectedLinear.from_module(child, init_mean, init_std)
+        else:  # must be nn.Linear
+            new_child = HardConcreteLinear.from_module(child, init_mean, init_std)
         delattr(new_module, name)
         setattr(new_module, name, new_child)
 
     return new_module
+
+
+def get_hardconcrete_linear_modules(module: nn.Module) -> List[nn.Module]:
+    """Get all HardConcrete*Linear modules.
+
+    Parameters
+    ----------
+    module : nn.Module
+        The input module
+
+    Returns
+    -------
+    List[nn.Module]
+        A list of the HardConcrete*Linear module.
+
+    """
+    modules = []
+    for m in module.children():
+        if isinstance(m, HardConcreteProjectedLinear):
+            modules.append(m)
+        elif isinstance(m, HardConcreteLinear):
+            modules.append(m)
+        else:
+            modules.extend(get_hardconcrete_linear_modules(m))
+    return modules
 
 
 def get_hardconcrete_proj_linear_modules(module: nn.Module) -> List[HardConcreteProjectedLinear]:

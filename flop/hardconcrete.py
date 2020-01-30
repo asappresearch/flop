@@ -108,7 +108,7 @@ class HardConcrete(nn.Module):
                 num_zeros = round(expected_num_zeros)
                 # Approximate expected value of each mask variable z;
                 # We use an empirically validated magic number 0.8
-                soft_mask = F.sigmoid(self.log_alpha * 0.8)
+                soft_mask = F.sigmoid(self.log_alpha / self.beta * 0.8)
                 # Prune small values to set to 0
                 _, indices = torch.topk(soft_mask, k=num_zeros, largest=False)
                 soft_mask[indices] = 0.
@@ -116,3 +116,9 @@ class HardConcrete(nn.Module):
             mask = self.compiled_mask
 
         return mask
+
+    def extre_repr(self) -> str:
+        return str(self.n_in)
+
+    def __repr__(self) -> str:
+        return "{}({})".format(self.__class__.__name__, self.extre_repr())
