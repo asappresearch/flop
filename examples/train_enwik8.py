@@ -111,7 +111,7 @@ def eval_model(model, valid):
             hidden.detach_()
             output, hidden = model(x, hidden)
             loss = criterion(output, y)
-            total_loss += loss.item()  # loss.data[0]
+            total_loss += loss.item()
         avg_loss = total_loss / valid[1].numel()
         ppl = np.exp(avg_loss)
         model.train()
@@ -146,7 +146,6 @@ def main(args):
     if args.prune:
         # in place substituion of linear ops in SRU
         flop.make_hard_concrete(model.rnn, in_place=True)
-        #model = flop.make_hard_concrete(model, in_place=True)
         model.cuda()
         print("model after inserting hardconcrete:")
         print(model)
@@ -240,7 +239,7 @@ def main(args):
                 if args.prune:
                     train_writer.add_scalar('sparsity/expected_sparsity', expected_sparsity, niter)
                     train_writer.add_scalar('sparsity/target_sparsity', target_sparsity, niter)
-                    train_writer.add_scalar('lagrangian_loss', lagrangian_loss, niter)
+                    train_writer.add_scalar('loss/lagrangian_loss', lagrangian_loss, niter)
                     train_writer.add_scalar('lambda/1', lambda_1.item(), niter)
                     train_writer.add_scalar('lambda/2', lambda_2.item(), niter)
                     if (niter - 1) % 3000 == 0:
@@ -256,8 +255,8 @@ def main(args):
                     lagrangian_loss,
                     expected_sparsity,
                 ))
-                train_writer.add_scalar('loss', loss, niter)
-                train_writer.add_scalar('loss_tot', loss + lagrangian_loss, niter)
+                train_writer.add_scalar('loss/lm_loss', loss, niter)
+                train_writer.add_scalar('loss/total_loss', loss + lagrangian_loss, niter)
                 train_writer.add_scalar('parameter_norm',
                     calc_norm([ x.data for x in m_parameters ]),
                     niter
@@ -285,7 +284,7 @@ def main(args):
             if nbatch % args.log_period == 0 or i == N - 1:
                 elapsed_time = (time.time()-start_time)/60.0
                 dev_ppl, dev_loss = eval_model(model, dev)
-                dev_writer.add_scalar('loss', dev_loss, niter)
+                dev_writer.add_scalar('loss/lm_loss', dev_loss, niter)
                 dev_writer.add_scalar('bpc', np.log2(dev_ppl), niter)
                 sparsity = 0
                 if args.prune:
