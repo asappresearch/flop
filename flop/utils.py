@@ -100,9 +100,9 @@ def get_hardconcrete_linear_modules(module: nn.Module) -> List[nn.Module]:
     """
     modules = []
     for m in module.children():
-        if isinstance(m, flop.HardConcreteProjectedLinear):
+        if isinstance(m, HardConcreteProjectedLinear):
             modules.append(m)
-        elif isinstance(m, flop.HardConcreteLinear):
+        elif isinstance(m, HardConcreteLinear):
             modules.append(m)
         else:
             modules.extend(get_hardconcrete_linear_modules(m))

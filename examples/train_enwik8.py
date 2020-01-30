@@ -8,12 +8,13 @@ import math
 import numpy as np
 import torch
 import torch.nn as nn
-import torch.optim as optim
 import torch.nn.functional as F
+from torch.optim import Adam
 from tensorboardX import SummaryWriter
 
 import sru
 import flop
+#from flambe.optim import RAdam
 
 def read_corpus(path, num_test_symbols=5000000):
     raw_data = open(path).read()
@@ -56,7 +57,7 @@ class Model(nn.Module):
             ))
         self.rnn = sru.SRU(self.n_e, self.n_d, self.depth,
             dropout = args.dropout,
-            n_proj = args.n_proj,
+            #projection_size = args.n_proj,
             #use_tanh = 0,
             highway_bias = args.bias,
             layer_norm = args.layer_norm,
@@ -155,7 +156,7 @@ def main(args):
         print(model)
         hc_modules = flop.get_hardconcrete_modules(model)
         hc_parameters = [p for m in hc_modules for p in m.parameters() if p.requires_grad]
-        optimizer_hc = optim.Adam(
+        optimizer_hc = Adam(
             hc_parameters,
             lr = lr * args.prune_lr,
             weight_decay = 0
@@ -164,7 +165,7 @@ def main(args):
         print("num of hardconcrete paramters: {}".format(num_hardconcrete_params))
         lambda_1 = nn.Parameter(torch.tensor(0.).cuda())
         lambda_2 = nn.Parameter(torch.tensor(0.).cuda())
-        optimizer_max = optim.Adam(
+        optimizer_max = Adam(
             [lambda_1, lambda_2],
             lr = lr,
             weight_decay = 0
@@ -177,7 +178,7 @@ def main(args):
         args.prune_start_epoch = args.max_epoch
 
     m_parameters = [i[1] for i in model.named_parameters() if i[1].requires_grad and 'log_alpha' not in i[0]]
-    optimizer = optim.Adam(
+    optimizer = Adam(
         m_parameters,
         lr = lr * args.lr,
         weight_decay = args.weight_decay

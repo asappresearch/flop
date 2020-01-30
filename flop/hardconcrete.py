@@ -118,3 +118,9 @@ class HardConcrete(nn.Module):
             mask = self.compiled_mask
 
         return mask
+
+    def extre_repr(self) -> str:
+        return str(self.n_in)
+
+    def __repr__(self) -> str:
+        return "{}({})".format(self.__class__.__name__, self.extre_repr())

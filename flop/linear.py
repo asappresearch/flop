@@ -103,6 +103,17 @@ class ProjectedLinear(Module):
         else:
             return self.linear2(self.linear1(data))
 
+    def extra_repr(self) -> str:
+        s = "in_features={in_features}, out_features={out_features}"
+        s += ", proj_features={proj_features}"
+        s += ", bias={}".format(str(self.linear2.bias is not None))
+        if self.activation is not None:
+            s += ", activation=" + str(self.activation)
+        return s.format(**self.__dict__)
+
+    def __repr__(self) -> str:
+        return "{}({})".format(self.__class__.__name__, self.extra_repr())
+
 
 class HardConcreteProjectedLinear(Module):
     """The hard concrete equivalent of ``ProjectedLinear``."""
@@ -291,6 +302,15 @@ class HardConcreteProjectedLinear(Module):
 
         return U if self.bias is None else U + self.bias
 
+    def extra_repr(self) -> str:
+        s = "in_features={in_features}, out_features={out_features}"
+        s += ", proj_features={proj_features}"
+        s += ", bias={}".format(str(self.bias is not None))
+        return s.format(**self.__dict__)
+
+    def __repr__(self) -> str:
+        return "{}({})".format(self.__class__.__name__, self.extra_repr())
+
 
 class HardConcreteLinear(Module):
     """The hard concrete equivalent of ``nn.Linear``."""
@@ -455,3 +475,11 @@ class HardConcreteLinear(Module):
                 U = data.index_select(-1, self.indices).matmul(self.compiled_weight)  # type: ignore
 
         return U if self.bias is None else U + self.bias
+
+    def extra_repr(self) -> str:
+        s = "in_features={in_features}, out_features={out_features}"
+        s += ", bias={}".format(str(self.bias is not None))
+        return s.format(**self.__dict__)
+
+    def __repr__(self) -> str:
+        return "{}({})".format(self.__class__.__name__, self.extra_repr())
