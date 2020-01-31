@@ -60,7 +60,7 @@ module, and perform training.
 
 ## Replicate results from the paper
 
-Coming soon.
+To replicate the SRU numbers, please look at the script ``examples/train_enwik8.py``.
 
 ## Cite
 
