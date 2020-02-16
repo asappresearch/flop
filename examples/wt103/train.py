@@ -17,13 +17,15 @@ import sru
 import flop
 from flambe.optim import RAdam
 from utils.adaptive_modules import AdaptiveEmbedding, AdaptiveLogSoftmax
+from utils.adaptive_modules import HardConcreteAdaptiveEmbedding, HardConcreteAdaptiveLogSoftmax
 from utils.data_utils import get_lm_corpus
 
 class Model(nn.Module):
     def __init__(self, args):
         super(Model, self).__init__()
         self.args = args
-        self.cutoffs = [20000, 40000, 200000]
+        #self.cutoffs = [20000, 40000, 200000]
+        self.cutoffs = [20000, 60000]
         self.n_V = args.n_token
         self.n_e = args.n_e or args.n_proj
         self.n_d = args.n_d
@@ -33,7 +35,8 @@ class Model(nn.Module):
             self.n_e,
             self.n_d,
             self.cutoffs,
-            div_val=args.div_val
+            div_val=args.div_val,
+            dropout=0.1
         )
         self.rnn = sru.SRU(self.n_d, self.n_d, self.depth,
             projection_size=args.n_proj,
@@ -51,17 +54,23 @@ class Model(nn.Module):
             self.n_e,
             self.n_d,
             self.cutoffs,
-            div_val=args.div_val
+            div_val=args.div_val,
+            dropout=0.1
         )
         self.init_weights()
-
-        # tie weights
         if not args.not_tie:
-            for i in range(len(self.output_layer.out_layers)):
-                self.embedding_layer.emb_layers[i].weight = self.output_layer.out_layers[i].weight
+            self.tie_weights()
 
-            for i in range(len(self.output_layer.out_projs)):
-                self.embedding_layer.emb_projs[i] = self.output_layer.out_projs[i]
+    def tie_weights(self):
+        for i in range(len(self.output_layer.out_layers)):
+            self.embedding_layer.emb_layers[i].weight = self.output_layer.out_layers[i].weight
+
+        for i in range(len(self.output_layer.out_projs)):
+            self.embedding_layer.emb_projs[i] = self.output_layer.out_projs[i]
+
+        if hasattr(self.embedding_layer, 'masks') and hasattr(self.output_layer, 'masks'):
+            delattr(self.output_layer, 'masks')
+            setattr(self.output_layer, 'masks', self.embedding_layer.masks)
 
     def init_weights(self, init_range=0.03, reinit_rnn=False):
         params = list(self.embedding_layer.parameters()) + list(self.output_layer.parameters())
@@ -95,6 +104,11 @@ def calc_norm(lis):
 
 def eval_model(model, valid):
     with torch.no_grad():
+        # Important: reset compiled masks. When multiple GPUs are used, model() and para_model()
+        # are not the same instance although they share the same parameters.
+        for m in flop.get_hardconcrete_modules(model):
+            m.compiled_mask = None
+
         model.eval()
         args = model.args
         batch_size = args.eval_batch_size or args.batch_size
@@ -138,18 +152,29 @@ def main(args):
     model.cuda()
     print(model)
     if torch.cuda.device_count() > 1:
-        para_model = torch.nn.DataParallel(model, dim=1, output_device=1)
+        para_model = torch.nn.DataParallel(model, dim=1)#, output_device=1)
     else:
         para_model = model
-
     lr = 1.0 if not args.noam else 1.0/(args.n_d**0.5)/(args.warmup_steps**1.5)
     if args.prune:
         # in place substituion of linear ops in SRU
-        flop.make_hard_concrete(model, in_place=True)
+        flop.make_hard_concrete(model.rnn, in_place=True, init_mean=args.prune_init_mean)
+        model.embedding_layer = HardConcreteAdaptiveEmbedding.from_module(
+                model.embedding_layer,
+                init_mean=args.prune_init_mean
+        )
+        model.output_layer = HardConcreteAdaptiveLogSoftmax.from_module(
+                model.output_layer,
+                init_mean=args.prune_init_mean
+        )
+        # tie weights again
+        model.tie_weights()
         model.cuda()
         print("model after inserting hardconcrete:")
         print(model)
-        hc_modules = flop.get_hardconcrete_modules(model)
+        hc_modules = flop.get_hardconcrete_modules(model.rnn) + flop.get_hardconcrete_modules(model.embedding_layer)
+        print(len(flop.get_hardconcrete_modules(model)))
+        print(len(hc_modules))
         hc_parameters = [p for m in hc_modules for p in m.parameters() if p.requires_grad]
         optimizer_hc = RAdam(
             hc_parameters,
@@ -166,7 +191,8 @@ def main(args):
             weight_decay = 0
         )
         optimizer_max.param_groups[0]['lr'] = -lr * args.prune_lr
-        hc_linear_modules = flop.get_hardconcrete_linear_modules(model)
+        hc_linear_modules = flop.get_hardconcrete_linear_modules(model) + \
+                [model.embedding_layer]
         num_prunable_params = sum(m.num_prunable_parameters() for m in hc_linear_modules)
         print("num of prunable paramters: {}".format(num_prunable_params))
     else:
@@ -255,7 +281,7 @@ def main(args):
                     math.exp(loss),
                     lagrangian_loss,
                     expected_sparsity,
-                    (time.time()-start_time)/60.0*N/(i+1),
+                    (time.time()-start_time)/60.0/(i+1)*(N-i-1),
                 ))
                 train_writer.add_scalar('loss/ppl', math.exp(loss), niter)
                 train_writer.add_scalar('loss/lm_loss', loss, niter)
@@ -302,6 +328,14 @@ def main(args):
                         num_params - num_prunable_params + pruned_size,
                         niter
                     )
+                    dev_writer.add_scalar('model_size/current_embedding',
+                        model.embedding_layer.num_parameters(train=False),
+                        niter
+                    )
+                    dev_writer.add_scalar('model_size/current_output_layer',
+                        model.output_layer.num_parameters(train=False),
+                        niter
+                    )
                 sys.stdout.write("\rnum_batches={}  lr={:.5f}  train_loss={:.4f}  dev_loss={:.4f}"
                         "  dev_bpc={:.2f}  sparsity={:.2f}\t[{:.1f}m]\n".format(
                     nbatch,
@@ -328,10 +362,11 @@ def main(args):
                 optimizer_max.param_groups[0]['lr'] = -lr * args.prune_lr / (args.n_d**0.5)
                 optimizer_hc.param_groups[0]['lr'] = lr * args.lr / (args.n_d**0.5)
 
-        if args.save and (epoch + 1) % 2 == 0:
-            torch.save(checkpoint, "{}.{}.pt".format(
+        if args.save and (epoch + 1) % 5 == 0:
+            torch.save(checkpoint, "{}.{}.{}.pt".format(
                 args.save,
                 epoch + 1,
+                int(dev_ppl)
                 #sparsity
             ))
 
@@ -386,6 +421,7 @@ if __name__ == "__main__":
     argparser.add_argument("--prune_lr", type=float, default=3)
     argparser.add_argument("--prune_warmup", type=int, default=0)
     argparser.add_argument("--prune_sparsity", type=float, default=0.)
+    argparser.add_argument("--prune_init_mean", type=float, default=0.1)
     argparser.add_argument("--prune_start_epoch", type=int, default=0)
 
     args = argparser.parse_args()
