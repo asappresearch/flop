@@ -106,9 +106,10 @@ def eval_model(model, valid):
     with torch.no_grad():
         # Important: reset compiled masks. When multiple GPUs are used, model() and para_model()
         # are not the same instance although they share the same parameters.
-        for m in flop.get_hardconcrete_modules(model):
-            m.compiled_mask = None
-
+        # Calling model(..) in training mode will reset all compiled weights and cached masks
+        for x, y, seq_len in valid:
+            model(x, y, hidden=None)
+            break
         model.eval()
         args = model.args
         batch_size = args.eval_batch_size or args.batch_size
