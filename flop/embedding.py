@@ -1,8 +1,3 @@
-'''
-Code taken from Transformer-XL
-https://github.com/kimiyoung/transformer-xl
-'''
-
 from collections import defaultdict
 import warnings
 
@@ -11,10 +6,16 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 
-from flop import HardConcrete
+from .hardconcrete import HardConcrete
 
 class AdaptiveEmbedding(nn.Module):
-    def __init__(self, n_token, d_embed, d_proj, cutoffs, div_val=1,
+'''
+    Code taken and modified from Transformer-XL
+    https://github.com/kimiyoung/transformer-xl
+'''
+    def __init__(self, n_token, d_embed, d_proj, cutoffs,
+                 div_val=1,
+                 div_freq=1,
                  dropout=0.0):
         super(AdaptiveEmbedding, self).__init__()
 
@@ -23,6 +24,7 @@ class AdaptiveEmbedding(nn.Module):
 
         self.cutoffs = cutoffs + [n_token]
         self.div_val = div_val
+        self.div_freq = div_freq
         self.d_proj = d_proj
 
         self.emb_scale = d_proj ** 0.5
@@ -35,7 +37,7 @@ class AdaptiveEmbedding(nn.Module):
 
         for i in range(len(self.cutoffs)):
             l_idx, r_idx = self.cutoff_ends[i], self.cutoff_ends[i+1]
-            d_emb_i = int(d_embed // (div_val ** i))
+            d_emb_i = int(d_embed // (div_val ** (i // div_freq)))
             self.emb_layers.append(nn.Embedding(r_idx-l_idx, d_emb_i))
             self.emb_projs.append(nn.Parameter(torch.Tensor(d_proj, d_emb_i)))
 
@@ -76,7 +78,9 @@ class AdaptiveEmbedding(nn.Module):
 
 
 class HardConcreteAdaptiveEmbedding(AdaptiveEmbedding):
-    def __init__(self, n_token, d_embed, d_proj, cutoffs, div_val=1,
+    def __init__(self, n_token, d_embed, d_proj, cutoffs,
+                 div_val=1,
+                 div_freq=1,
                  dropout=0.0,
                  init_mean: float = 0.5,
                  init_std: float = 0.01):
@@ -84,6 +88,7 @@ class HardConcreteAdaptiveEmbedding(AdaptiveEmbedding):
         super(HardConcreteAdaptiveEmbedding, self).__init__(
             n_token, d_embed, d_proj, cutoffs,
             div_val=div_val,
+            div_freq=div_freq,
             dropout=dropout
         )
 
@@ -145,7 +150,7 @@ class HardConcreteAdaptiveEmbedding(AdaptiveEmbedding):
                 if len(indices_i) == 0:
                     warnings.warn("Mask is all zero in AdaptiveEmbedding layer-{}".format(i), RuntimeWarning)
 
-                if len(indices_i) > dim_i * 0.8:
+                if len(indices_i) == 0 or len(indices_i) > dim_i * 0.8:
                     embedding_i = self.emb_layers[i].weight * mask_i.view(1, -1)
                     emb_proj_i = self.emb_projs[i]
                 else:
@@ -162,11 +167,7 @@ class HardConcreteAdaptiveEmbedding(AdaptiveEmbedding):
                 self.compiled_embeddings = embeddings
                 self.compiled_projs = emb_projs
                 # debug
-                for i, indices_i in enumerate(self.indices):
-                    print ("AE {}: {}, {}  {}".format(
-                        i, len(indices_i), self.masks[i].training,
-                        indices_i[:10]
-                    ))
+                #print("\n", [len(indices_i) for indices_i in self.indices])
 
         return self._forward(inp, embeddings, emb_projs)
 
@@ -182,10 +183,12 @@ class HardConcreteAdaptiveEmbedding(AdaptiveEmbedding):
         d_proj = module.d_proj
         cutoffs = module.cutoffs[:-1]
         div_val = module.div_val
+        div_freq = module.div_freq
         dropout = module.dropout.p
 
         new_module = cls(n_token, d_embed, d_proj, cutoffs,
                          div_val=div_val,
+                         div_freq=div_freq,
                          dropout=dropout,
                          init_mean=init_mean,
                          init_std=init_std)
@@ -199,16 +202,24 @@ class HardConcreteAdaptiveEmbedding(AdaptiveEmbedding):
 
 
 class AdaptiveLogSoftmax(nn.Module):
-    def __init__(self, n_token, d_embed, d_proj, cutoffs, div_val=1,
-                 dropout=0.0, keep_order=False):
+'''
+    Code taken and modified from Transformer-XL
+    https://github.com/kimiyoung/transformer-xl
+'''
+    def __init__(self, n_token, d_embed, d_proj, cutoffs,
+                 div_val=1,
+                 div_freq=1,
+                 dropout=0.0, keep_order=True):
         super(AdaptiveLogSoftmax, self).__init__()
 
         self.n_token = n_token
         self.d_embed = d_embed
+        self.d_proj = d_proj
 
         self.cutoffs = cutoffs + [n_token]
         self.cutoff_ends = [0] + self.cutoffs
         self.div_val = div_val
+        self.div_freq = div_freq
 
         self.shortlist_size = self.cutoffs[0]
         self.n_clusters = len(self.cutoffs) - 1
@@ -220,7 +231,7 @@ class AdaptiveLogSoftmax(nn.Module):
 
         for i in range(len(self.cutoffs)):
             l_idx, r_idx = self.cutoff_ends[i], self.cutoff_ends[i+1]
-            d_emb_i = int(d_embed // (div_val ** i))
+            d_emb_i = int(d_embed // (div_val ** (i // div_freq)))
             output_size_i = r_idx - l_idx if i > 0 else (r_idx - l_idx) + self.n_clusters
 
             self.out_projs.append(
@@ -311,14 +322,18 @@ class AdaptiveLogSoftmax(nn.Module):
 
 
 class HardConcreteAdaptiveLogSoftmax(AdaptiveLogSoftmax):
-    def __init__(self, n_token, d_embed, d_proj, cutoffs, div_val=1,
-                 dropout=0.0, keep_order=False,
+    def __init__(self, n_token, d_embed, d_proj, cutoffs,
+                 div_val=1,
+                 div_freq=1,
+                 dropout=0.0,
+                 keep_order=True,
                  init_mean: float = 0.5,
                  init_std: float = 0.01):
 
         super(HardConcreteAdaptiveLogSoftmax, self).__init__(
             n_token, d_embed, d_proj, cutoffs,
             div_val=div_val,
+            div_freq=div_freq,
             dropout=dropout,
             keep_order=keep_order
         )
@@ -387,7 +402,7 @@ class HardConcreteAdaptiveLogSoftmax(AdaptiveLogSoftmax):
                 if len(indices_i) == 0:
                     warnings.warn("Mask is all zero in AdaptiveSoftmax layer-{}".format(i), RuntimeWarning)
 
-                if len(indices_i) > dim_i * 0.8:
+                if len(indices_i) == 0 or len(indices_i) > dim_i * 0.8:
                     embedding_i = self.out_layers[i].weight * mask_i.view(1, -1)
                     emb_proj_i = self.out_projs[i]
                 else:
@@ -404,11 +419,7 @@ class HardConcreteAdaptiveLogSoftmax(AdaptiveLogSoftmax):
                 self.compiled_embeddings = weights
                 self.compiled_projs = out_projs
                 # debug
-                for i, indices_i in enumerate(self.indices):
-                    print ("AS {}: {}, {}  {}".format(
-                        i, len(indices_i), self.masks[i].training,
-                        indices_i[:10]
-                    ))
+                #print("\n", [len(indices_i) for indices_i in self.indices])
 
         return self._forward(hidden, target,
                              weights, biases, out_projs,
@@ -423,14 +434,16 @@ class HardConcreteAdaptiveLogSoftmax(AdaptiveLogSoftmax):
 
         n_token = module.n_token
         d_embed = module.d_embed
-        d_proj = module.out_projs[0].size(0)
+        d_proj = module.d_proj
         cutoffs = module.cutoffs[:-1]
         div_val = module.div_val
+        div_freq = module.div_freq
         dropout = module.dropout.p
         keep_order = module.keep_order
 
         new_module = cls(n_token, d_embed, d_proj, cutoffs,
                          div_val=div_val,
+                         div_freq=div_freq,
                          dropout=dropout,
                          keep_order=keep_order,
                          init_mean=init_mean,

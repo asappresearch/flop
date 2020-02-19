@@ -16,16 +16,16 @@ from tensorboardX import SummaryWriter
 import sru
 import flop
 from flambe.optim import RAdam
-from utils.adaptive_modules import AdaptiveEmbedding, AdaptiveLogSoftmax
-from utils.adaptive_modules import HardConcreteAdaptiveEmbedding, HardConcreteAdaptiveLogSoftmax
+from flop.embedding import AdaptiveEmbedding, AdaptiveLogSoftmax
+from flop.embedding import HardConcreteAdaptiveEmbedding, HardConcreteAdaptiveLogSoftmax
 from utils.data_utils import get_lm_corpus
 
 class Model(nn.Module):
     def __init__(self, args):
         super(Model, self).__init__()
         self.args = args
-        #self.cutoffs = [20000, 40000, 200000]
-        self.cutoffs = [20000, 60000]
+        #self.cutoffs = [20000, 60000]
+        self.cutoffs = [10000, 20000, 40000, 60000, 100000]
         self.n_V = args.n_token
         self.n_e = args.n_e or args.n_proj
         self.n_d = args.n_d
@@ -36,6 +36,7 @@ class Model(nn.Module):
             self.n_d,
             self.cutoffs,
             div_val=args.div_val,
+            div_freq=2,
             dropout=0.1
         )
         self.rnn = sru.SRU(self.n_d, self.n_d, self.depth,
@@ -55,7 +56,9 @@ class Model(nn.Module):
             self.n_d,
             self.cutoffs,
             div_val=args.div_val,
-            dropout=0.1
+            div_freq=2
+            dropout=0.1,
+            keep_order=False
         )
         self.init_weights()
         if not args.not_tie:
