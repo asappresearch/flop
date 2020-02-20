@@ -56,7 +56,7 @@ class Model(nn.Module):
             self.n_d,
             self.cutoffs,
             div_val=args.div_val,
-            div_freq=2
+            div_freq=2,
             dropout=0.1,
             keep_order=False
         )
