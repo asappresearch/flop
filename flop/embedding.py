@@ -9,10 +9,10 @@ import torch.nn.functional as F
 from .hardconcrete import HardConcrete
 
 class AdaptiveEmbedding(nn.Module):
-'''
+    '''
     Code taken and modified from Transformer-XL
     https://github.com/kimiyoung/transformer-xl
-'''
+    '''
     def __init__(self, n_token, d_embed, d_proj, cutoffs,
                  div_val=1,
                  div_freq=1,
@@ -202,10 +202,10 @@ class HardConcreteAdaptiveEmbedding(AdaptiveEmbedding):
 
 
 class AdaptiveLogSoftmax(nn.Module):
-'''
+    '''
     Code taken and modified from Transformer-XL
     https://github.com/kimiyoung/transformer-xl
-'''
+    '''
     def __init__(self, n_token, d_embed, d_proj, cutoffs,
                  div_val=1,
                  div_freq=1,
