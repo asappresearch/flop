@@ -84,7 +84,7 @@ class ProjectedLinear(Module):
 
         return new_module
 
-    def forward(self, data: torch.Tensor) -> torch.Tensor:  # type: ignore
+    def forward(self, data: torch.Tensor, **kwargs) -> torch.Tensor:  # type: ignore
         """Perform a forward pass through the layer.
 
         Parameters
@@ -244,7 +244,7 @@ class HardConcreteProjectedLinear(Module):
             params += len(self.compiled_weight.view(-1)) + len(self.compiled_weight_proj.view(-1))
         return params
 
-    def forward(self, data: torch.Tensor) -> torch.Tensor:  # type: ignore
+    def forward(self, data: torch.Tensor, **kwargs) -> torch.Tensor:  # type: ignore
         """Perform the forward pass.
 
         Parameters
@@ -423,7 +423,7 @@ class HardConcreteLinear(Module):
             params += len(self.compiled_weight.view(-1))
         return params
 
-    def forward(self, data: torch.Tensor) -> torch.Tensor:  # type: ignore
+    def forward(self, data: torch.Tensor, **kwargs) -> torch.Tensor:  # type: ignore
         """Perform the forward pass.
 
         Parameters
