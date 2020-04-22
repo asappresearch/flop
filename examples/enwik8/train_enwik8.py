@@ -47,9 +47,9 @@ class Model(nn.Module):
         self.drop = nn.Dropout(args.dropout)
         self.embedding_layer = nn.Embedding(len(words), self.n_e)
         self.n_V = len(words)
-        custom_u_list = [nn.Linear(self.n_e, self.n_d * 4, bias=False)]
+        custom_m_list = [nn.Linear(self.n_e, self.n_d * 4, bias=False)]
         for i in range(self.depth-1):
-            custom_u_list.append(flop.ProjectedLinear(
+            custom_m_list.append(flop.ProjectedLinear(
                 self.n_d, self.n_d * 3,
                 proj_features=args.n_proj,
                 bias=False
@@ -59,7 +59,7 @@ class Model(nn.Module):
             highway_bias = args.bias,
             layer_norm = args.layer_norm,
             rescale = args.rescale,
-            custom_u = custom_u_list
+            custom_m = custom_m_list
         )
         self.output_layer = nn.Linear(self.n_d, self.n_V)
         self.init_weights()
