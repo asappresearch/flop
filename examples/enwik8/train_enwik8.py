@@ -34,6 +34,15 @@ def create_batches(data_ids, batch_size):
     x, y = x.cuda(), y.cuda()
     return x, y
 
+class CustomLinear(nn.Linear):
+    def __init__(self, in_features, out_features, bias=False):
+        super(CustomLinear, self).__init__(
+                in_features, out_features, bias=bias
+            )
+
+    def forward(self, data, **kwargs):
+        return super().forward(data)
+
 class Model(nn.Module):
     def __init__(self, words, args):
         super(Model, self).__init__()
@@ -47,7 +56,7 @@ class Model(nn.Module):
         self.drop = nn.Dropout(args.dropout)
         self.embedding_layer = nn.Embedding(len(words), self.n_e)
         self.n_V = len(words)
-        custom_m_list = [nn.Linear(self.n_e, self.n_d * 4, bias=False)]
+        custom_m_list = [CustomLinear(self.n_e, self.n_d * 4, bias=False)]
         for i in range(self.depth-1):
             custom_m_list.append(flop.ProjectedLinear(
                 self.n_d, self.n_d * 3,
