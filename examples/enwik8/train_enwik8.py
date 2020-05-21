@@ -369,7 +369,7 @@ if __name__ == "__main__":
     argparser.add_argument("--n_e", type=int, default=0)
     argparser.add_argument("--n_d", "--d", type=int, default=3056)
     argparser.add_argument("--n_proj", type=int, default=512)
-    argparser.add_argument("--dropout", type=float, default=0.2,
+    argparser.add_argument("--dropout", type=float, default=0.1,
         help="dropout probability"
     )
     argparser.add_argument("--bias", type=float, default=-3,
