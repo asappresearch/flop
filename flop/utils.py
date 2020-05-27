@@ -30,7 +30,7 @@ def make_projected_linear(module: nn.Module, in_place: bool = True) -> nn.Module
         if isinstance(child, nn.Linear):
             modules.append((name, child))
         else:
-            make_projected_linear(module, in_place)
+            make_projected_linear(child, in_place)
 
     # Replace all modules found
     new_module = module if in_place else deepcopy(module)
