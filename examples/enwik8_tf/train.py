@@ -147,8 +147,8 @@ parser.add_argument('--dynamic-loss-scale', action='store_true',
 parser.add_argument("--prune", action="store_true")
 parser.add_argument("--prune_load", type=str, default="")
 parser.add_argument("--prune_lr", type=float, default=1)
-parser.add_argument("--prune_warmup", type=int, default=0)
-parser.add_argument("--prune_sparsity", type=float, default=0.)
+parser.add_argument("--prune_warmup", type=int, default=64000)
+parser.add_argument("--prune_sparsity", type=float, default=0)
 parser.add_argument("--prune_init_mean", type=float, default=0.05)
 
 args = parser.parse_args()
@@ -286,9 +286,12 @@ if args.restart:
     model.apply(update_dropout)
     model.apply(update_dropatt)
 elif args.prune:
-    # load pre-trained model and inject HardConcrete modules
+    # load pre-trained model and insert HardConcrete modules
     model = torch.load(args.prune_load)
-    flop.make_hard_conrete(model.layers, in_place=True, init_mean=args.prune_init_mean)
+    model.apply(update_dropout)
+    model.apply(update_dropatt)
+    flop.make_hard_concrete(model.layers, in_place=True, init_mean=args.prune_init_mean)
+    print(model.layers)
 else:
     model = MemTransformerLM(ntokens, args.n_layer, args.n_head, args.d_model,
         args.d_head, args.d_inner, args.dropout, args.dropatt,
@@ -299,7 +302,7 @@ else:
         clamp_len=args.clamp_len, sample_softmax=args.sample_softmax)
     # in place substituion of linear ops into projectedlinear
     flop.make_projected_linear(model.layers, in_place=True)
-    print(model)
+    print(model.layers)
     model.apply(weights_init)
     model.word_emb.apply(weights_init) # ensure embedding init is not overridden by out_layer in case of weight sharing
 args.n_all_param = sum([p.nelement() for p in model.parameters()])
@@ -351,7 +354,7 @@ elif args.optim.lower() == 'adagrad':
 
 if args.prune:
     hc_linear_modules = flop.get_hardconcrete_linear_modules(model)
-    num_prunable_params = sum(m.num_prunable_params() for m in hc_linear_modules)
+    num_prunable_params = sum(m.num_prunable_parameters() for m in hc_linear_modules)
     print("num of prunable parameters: {}".format(num_prunable_params))
 
     lambda_1 = nn.Parameter(torch.tensor(0.).to(device))
