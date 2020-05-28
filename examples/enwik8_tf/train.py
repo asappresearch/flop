@@ -606,9 +606,9 @@ def train():
                 dev_writer.add_scalar("sparsity/hard_sparsity", sparsity, train_step)
                 dev_writer.add_scalar("model_size/total_prunable", num_prunable_params, train_step)
                 dev_writer.add_scalar("model_size/current_prunable", pruned_size, train_step)
-                dev_writer.add_scalar("model_size/total", n_all_param, train_step)
+                dev_writer.add_scalar("model_size/total", args.n_all_param, train_step)
                 dev_writer.add_scalar("model_size/current",
-                    n_all_param - num_prunable_params + pruned_size,
+                    args.n_all_param - num_prunable_params + pruned_size,
                     train_step
                 )
 
