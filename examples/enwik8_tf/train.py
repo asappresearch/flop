@@ -231,7 +231,12 @@ def init_bias(bias):
 
 def weights_init(m):
     classname = m.__class__.__name__
-    if classname.find('Linear') != -1:
+    if classname.find('ProjectedLinear') != -1:
+        init_weight(m.linear1.weight)
+        nn.init.xavier_uniform_(m.linear2.weight)
+        if hasattr(m.linear2, 'bias') and m.linear2.bias is not None:
+            init_bias(m.linear2.bias)
+    elif classname.find('Linear') != -1:
         if hasattr(m, 'weight') and m.weight is not None:
             init_weight(m.weight)
         if hasattr(m, 'bias') and m.bias is not None:

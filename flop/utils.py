@@ -36,7 +36,6 @@ def make_projected_linear(module: nn.Module, in_place: bool = True) -> nn.Module
     new_module = module if in_place else deepcopy(module)
     for name, child in modules:
         new_child = ProjectedLinear.from_module(child)
-        delattr(new_module, name)
         setattr(new_module, name, new_child)
 
     return new_module
@@ -78,7 +77,6 @@ def make_hard_concrete(module: nn.Module,
             new_child = HardConcreteProjectedLinear.from_module(child, init_mean, init_std)
         else:  # must be nn.Linear
             new_child = HardConcreteLinear.from_module(child, init_mean, init_std)
-        delattr(new_module, name)
         setattr(new_module, name, new_child)
 
     return new_module
