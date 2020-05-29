@@ -1,0 +1,24 @@
+flop: /Users/jeremy/Documents/asapp/flop2
+distiller: /Users/jeremy/Documents/asapp/distiller
+
+---
+
+!Experiment
+
+name: wiki103-unstruct
+
+resources:
+  data_file: !cluster s3://asapp-mlresearch/tao/wikitext-103-v1.zip
+  checkpoint: !cluster s3://asapp-mlresearch/tao/wt103_sru_12_2048_512_lr2_wm4k.50.pt
+
+pipeline:
+
+  prune_large: !Script
+    script: flop.scripts.wt103.train_agp_unstruct
+    args: []
+    kwargs:
+      warmup_steps: 4000
+      prune_end_epoch: 40
+      prune_sparsity: !g [0.5, 0.7, 0.8]
+      data: !@ data_file
+      load: !@ checkpoint

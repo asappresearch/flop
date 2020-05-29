@@ -1,11 +1,16 @@
-from typing import List
+from typing import List, Union, Tuple
 from copy import deepcopy
 
 import torch.nn as nn
 
 from flambe.logging import log_histogram
 from flop.hardconcrete import HardConcrete
-from flop.linear import ProjectedLinear, HardConcreteProjectedLinear, HardConcreteLinear
+from flop.linear import (
+    ProjectedLinear,
+    HardConcreteProjectedLinear,
+    HardConcreteLinear,
+    ProjectedLinearWithMask,
+)
 
 
 def make_projected_linear(module: nn.Module, in_place: bool = True) -> nn.Module:
@@ -42,11 +47,56 @@ def make_projected_linear(module: nn.Module, in_place: bool = True) -> nn.Module
     return new_module
 
 
-def make_hard_concrete(module: nn.Module,
-                       in_place: bool = True,
-                       init_mean: float = 0.5,
-                       init_std: float = 0.01) -> nn.Module:
+def make_hard_concrete(
+    module: nn.Module,
+    in_place: bool = True,
+    init_mean: float = 0.5,
+    init_std: float = 0.01,
+) -> nn.Module:
     """Replace all ProjectedLinear with HardConcreteProjectedLinear.
+
+    Parameters
+    ----------
+    module : nn.Module
+        The input module to modify
+    in_place : bool, optional
+        Whether to modify in place, by default True
+
+    Returns
+    -------
+    nn.Module
+        The updated module.
+
+    """
+    # First find all ProjectedLinear modules
+    modules: List[Tuple[str, Union[ProjectedLinear, nn.Linear]]] = []
+    for name, child in module.named_children():
+        if isinstance(child, ProjectedLinear):
+            modules.append((name, child))
+        elif isinstance(child, nn.Linear):
+            modules.append((name, child))
+        else:
+            make_hard_concrete(child, in_place)
+
+    # Replace all modules found
+    new_module = module if in_place else deepcopy(module)
+    for name, child in modules:
+        if isinstance(child, ProjectedLinear):
+            new_child = HardConcreteProjectedLinear.from_module(
+                child, init_mean, init_std
+            )
+        else:  # must be nn.Linear
+            new_child = HardConcreteLinear.from_module(child, init_mean, init_std)
+        delattr(new_module, name)
+        setattr(new_module, name, new_child)
+
+    return new_module
+
+
+def make_projected_linear_with_mask(
+    module: nn.Module, in_place: bool = True,
+) -> nn.Module:
+    """Replace all ProjectedLinear with ProjectedLinearWithMask.
 
     Parameters
     ----------
@@ -66,25 +116,22 @@ def make_hard_concrete(module: nn.Module,
     for name, child in module.named_children():
         if isinstance(child, ProjectedLinear):
             modules.append((name, child))
-        elif isinstance(child, nn.Linear):
-            modules.append((name, child))
         else:
-            make_hard_concrete(child, in_place)
+            make_projected_linear_with_mask(child, in_place)
 
     # Replace all modules found
     new_module = module if in_place else deepcopy(module)
     for name, child in modules:
-        if isinstance(child, ProjectedLinear):
-            new_child = HardConcreteProjectedLinear.from_module(child, init_mean, init_std)
-        else:  # must be nn.Linear
-            new_child = HardConcreteLinear.from_module(child, init_mean, init_std)
+        new_child = ProjectedLinearWithMask.from_module(child)
         delattr(new_module, name)
         setattr(new_module, name, new_child)
 
     return new_module
 
 
-def get_hardconcrete_linear_modules(module: nn.Module) -> List[nn.Module]:
+def get_hardconcrete_linear_modules(
+    module: nn.Module,
+) -> List[Union[HardConcreteProjectedLinear, HardConcreteLinear]]:
     """Get all HardConcrete*Linear modules.
 
     Parameters
@@ -98,7 +145,7 @@ def get_hardconcrete_linear_modules(module: nn.Module) -> List[nn.Module]:
         A list of the HardConcrete*Linear module.
 
     """
-    modules = []
+    modules: List[Union[HardConcreteProjectedLinear, HardConcreteLinear]] = []
     for m in module.children():
         if isinstance(m, HardConcreteProjectedLinear):
             modules.append(m)
@@ -109,7 +156,9 @@ def get_hardconcrete_linear_modules(module: nn.Module) -> List[nn.Module]:
     return modules
 
 
-def get_hardconcrete_proj_linear_modules(module: nn.Module) -> List[HardConcreteProjectedLinear]:
+def get_hardconcrete_proj_linear_modules(
+    module: nn.Module,
+) -> List[HardConcreteProjectedLinear]:
     """Get all HardConcreteProjectedLinear modules.
 
     Parameters
@@ -155,6 +204,54 @@ def get_hardconcrete_modules(module: nn.Module) -> List[HardConcrete]:
     return modules
 
 
+def get_projected_linear_with_mask_modules(
+    module: nn.Module,
+) -> List[ProjectedLinearWithMask]:
+    """Get all ProjectedLinearWithMask modules.
+
+    Parameters
+    ----------
+    module : nn.Module
+        The input module
+
+    Returns
+    -------
+    List[HardConcreteProjectedLinear]
+        A list of the ProjectedLinearWithMask module.
+
+    """
+    modules = []
+    for m in module.children():
+        if isinstance(m, ProjectedLinearWithMask):
+            modules.append(m)
+        else:
+            modules.extend(get_projected_linear_with_mask_modules(m))
+    return modules
+
+
+def get_projected_linear_masks(module: nn.Module) -> List[nn.Parameter]:
+    """Get all masks from ProjectedLinearWithMask modules.
+
+    Parameters
+    ----------
+    module : nn.Module
+        The input module
+
+    Returns
+    -------
+    List[HardConcrete]
+        A list of the masks.
+
+    """
+    modules = []
+    for m in module.children():
+        if isinstance(m, ProjectedLinearWithMask):
+            modules.append(m.mask)
+        else:
+            modules.extend(get_projected_linear_masks(m))
+    return modules
+
+
 def get_num_prunable_params(modules) -> int:
     return sum([module.num_prunable_parameters() for module in modules])
 
@@ -168,5 +265,5 @@ def log_masks(model, masks, step):
     mask_names = [i[0] for i in model.named_parameters() if "log_alpha" in i[0]]
     alphas = [i[1] for i in model.named_parameters() if "log_alpha" in i[0]]
     for name, log_alpha, mask in zip(mask_names, alphas, masks):
-        log_histogram(name, log_alpha.detach().cpu().numpy(), step, bins='sqrt')
-        log_histogram(name + ".mask", mask.detach().cpu().numpy(), step, bins='sqrt')
+        log_histogram(name, log_alpha.detach().cpu().numpy(), step, bins="sqrt")
+        log_histogram(name + ".mask", mask.detach().cpu().numpy(), step, bins="sqrt")
