@@ -247,9 +247,9 @@ class HardConcreteProjectedLinear(Module):
             n_proj = self.mask.l0_norm()
             params += self.in_features * n_proj + self.out_features * n_proj
         elif self.compiled_weight is not None and self.compiled_weight_proj is not None:
-            params += len(self.compiled_weight.view(-1)) + len(
-                self.compiled_weight_proj.view(-1)
-            )
+            if isinstance(self.compiled_weight, int) and self.compiled_weight == -1:
+                return params
+            params += len(self.compiled_weight.view(-1)) + len(self.compiled_weight_proj.view(-1))
         return params
 
     def forward(self, data: torch.Tensor, **kwargs) -> torch.Tensor:  # type: ignore
@@ -428,6 +428,8 @@ class HardConcreteLinear(Module):
             n_active = self.mask.l0_norm()
             params += n_active * self.out_features
         elif self.compiled_weight is not None:
+            if isinstance(self.compiled_weight, int) and self.compiled_weight == -1:
+                return params
             params += len(self.compiled_weight.view(-1))
         return params
 
