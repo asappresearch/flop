@@ -457,7 +457,7 @@ if __name__ == "__main__":
     argparser.add_argument("--prune", action="store_true")
     argparser.add_argument("--prune_lr", type=float, default=3)
     argparser.add_argument("--prune_beta", type=float, default=1)
-    argparser.add_argument("--prune_warmup", type=int, default=0)
+    argparser.add_argument("--prune_warmup", type=int, default=64000)
     argparser.add_argument("--prune_sparsity", type=float, default=0.)
     argparser.add_argument("--prune_init_mean", type=float, default=0.05)
     argparser.add_argument("--prune_start_epoch", type=int, default=0)
