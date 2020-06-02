@@ -289,7 +289,7 @@ def main(args):
 
                 # compute lagrangian loss
                 lagrangian_loss = lambda_1 * (expected_sparsity - target_sparsity) + \
-                                  lambda_2 * (expected_sparsity - target_sparsity)**2
+                                  lambda_2 * (expected_sparsity - target_sparsity)**2 * args.prune_beta
                 (lagrangian_loss / args.update_param_freq).backward()
                 expected_sparsity = expected_sparsity.item()
                 lagrangian_loss = lagrangian_loss.item()
@@ -380,8 +380,9 @@ def main(args):
                     elapsed_time
                 ))
                 if dev_ppl < best_dev:
-                    best_dev = dev_ppl
-                    checkpoint = copy_model(model_)
+                    if (not args.prune) or sparsity > args.prune_sparsity - 0.02:
+                        best_dev = dev_ppl
+                        checkpoint = copy_model(model_)
                 sys.stdout.write("\n")
                 sys.stdout.flush()
 
@@ -396,7 +397,7 @@ def main(args):
                 optimizer_hc.param_groups[0]['lr'] = lr * args.lr / (args.n_d**0.5)
 
         if local_rank == 0 and args.save and (epoch + 1) % 10 == 0:
-            torch.save(checkpoint, "{}.{}.{}.pt".format(
+            torch.save(copy_model(model_), "{}.{}.{}.pt".format(
                 args.save,
                 epoch + 1,
                 int(dev_ppl)
@@ -429,7 +430,7 @@ if __name__ == "__main__":
     argparser.add_argument("--not_tie", action="store_true")
     argparser.add_argument("--data", type=str, required=True, help="training file")
     argparser.add_argument("--update_param_freq", type=int, default=1)
-    argparser.add_argument("--batch_size", "--batch", type=int, default=64)
+    argparser.add_argument("--batch_size", "--batch", type=int, default=24)
     argparser.add_argument("--eval_batch_size", type=int, default=10)
     argparser.add_argument("--unroll_size", type=int, default=256)
     argparser.add_argument("--eval_unroll_size", type=int, default=0)
@@ -455,9 +456,10 @@ if __name__ == "__main__":
 
     argparser.add_argument("--prune", action="store_true")
     argparser.add_argument("--prune_lr", type=float, default=3)
+    argparser.add_argument("--prune_beta", type=float, default=1)
     argparser.add_argument("--prune_warmup", type=int, default=0)
     argparser.add_argument("--prune_sparsity", type=float, default=0.)
-    argparser.add_argument("--prune_init_mean", type=float, default=0.1)
+    argparser.add_argument("--prune_init_mean", type=float, default=0.05)
     argparser.add_argument("--prune_start_epoch", type=int, default=0)
 
     argparser.add_argument("--local_rank", type=int, default=0)

@@ -319,8 +319,9 @@ def main(args):
                     elapsed_time
                 ))
                 if dev_ppl < best_dev:
-                    best_dev = dev_ppl
-                    checkpoint = copy_model(model)
+                    if (not args.prune) or sparsity > args.prune_sparsity - 0.02:
+                        best_dev = dev_ppl
+                        checkpoint = copy_model(model)
                 sys.stdout.write("\n")
                 sys.stdout.flush()
 
@@ -335,7 +336,7 @@ def main(args):
                 optimizer_hc.param_groups[0]['lr'] = lr * args.lr / (args.n_d**0.5)
 
         if args.save and (epoch + 1) % 10 == 0:
-            torch.save(checkpoint, "{}.{}.{:.3f}.pt".format(
+            torch.save(copy_model(model), "{}.{}.{:.3f}.pt".format(
                 args.save,
                 epoch + 1,
                 sparsity

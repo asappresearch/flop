@@ -387,8 +387,9 @@ def main(args):
                     elapsed_time
                 ))
                 if dev_ppl < best_dev:
-                    best_dev = dev_ppl
-                    checkpoint = copy_model(model_)
+                    if (not args.prune) or sparsity > args.prune_sparsity - 0.02:
+                        best_dev = dev_ppl
+                        checkpoint = copy_model(model_)
                 sys.stdout.write("\n")
                 sys.stdout.flush()
 
@@ -403,7 +404,7 @@ def main(args):
                 optimizer_hc.param_groups[0]['lr'] = lr * args.lr / (args.n_d**0.5)
 
         if local_rank == 0 and args.save and (epoch + 1) % 10 == 0:
-            torch.save(checkpoint, "{}.{}.{}.pt".format(
+            torch.save(copy_model(model_), "{}.{}.{}.pt".format(
                 args.save,
                 epoch + 1,
                 int(dev_ppl)
@@ -462,9 +463,10 @@ if __name__ == "__main__":
 
     argparser.add_argument("--prune", action="store_true")
     argparser.add_argument("--prune_lr", type=float, default=3)
+    argparser.add_argument("--prune_beta", type=float, default=1)
     argparser.add_argument("--prune_warmup", type=int, default=0)
     argparser.add_argument("--prune_sparsity", type=float, default=0.)
-    argparser.add_argument("--prune_init_mean", type=float, default=0.1)
+    argparser.add_argument("--prune_init_mean", type=float, default=0.05)
     argparser.add_argument("--prune_start_epoch", type=int, default=0)
 
     argparser.add_argument("--local_rank", type=int, default=0)
