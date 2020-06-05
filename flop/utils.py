@@ -68,7 +68,7 @@ def make_hard_concrete(module: nn.Module,
         elif isinstance(child, nn.Linear):
             modules.append((name, child))
         else:
-            make_hard_concrete(child, in_place)
+            make_hard_concrete(child, in_place, init_mean, init_std)
 
     # Replace all modules found
     new_module = module if in_place else deepcopy(module)
