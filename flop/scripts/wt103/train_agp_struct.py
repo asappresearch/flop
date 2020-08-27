@@ -163,8 +163,8 @@ def main(args):
         dev_writer = SummaryWriter(log_dir=log_path + "/dev")
 
     # set up distributed training
-    torch.cuda.set_device(args.local_rank)
-    device = torch.device("cuda", args.local_rank)
+    # torch.cuda.set_device(args.local_rank)
+    device = 'cuda'
     # torch.distributed.init_process_group(backend="nccl")
     set_seed(1234)
     args.n_gpu = 1
@@ -184,7 +184,7 @@ def main(args):
     #                                         unroll_size, n_nodes=n_nodes,
     #                                         rank=local_rank, device=device)
     train = corpus.get_iterator("train", batch_size, unroll_size, device=device)
-    dev = corpus.get_iterator("valid", eval_batch_size, eval_unroll_size, device=device)
+    dev = corpus.get_iterator("test", eval_batch_size, eval_unroll_size, device=device)
     if local_rank == 0:
         print("vocab size: {}".format(n_token))
 
@@ -256,6 +256,7 @@ def main(args):
     num_params = sum(x.numel() for x in m_parameters if x.requires_grad)
 
     model_ = model
+    model = nn.DataParallel(model, dim=1).to('cuda')
     # model = torch.nn.parallel.DistributedDataParallel(
     #     model, dim=1, device_ids=[local_rank], output_device=local_rank,
     # )
@@ -423,9 +424,7 @@ def main(args):
                         elapsed_time,
                     )
                 )
-                if dev_ppl < best_dev:
-                    best_dev = dev_ppl
-                    checkpoint = copy_model(model_)
+                checkpoint = copy_model(model_)
                 sys.stdout.write("\n")
                 sys.stdout.flush()
 

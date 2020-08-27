@@ -1,18 +1,13 @@
-import os
 import sys
 import argparse
-import time
-import random
 
 import numpy as np
 import torch
 import torch.nn as nn
-from torch.optim import Adam
-from tensorboardX import SummaryWriter
 
 import sru
 import flop
-import flambe
+# import flambe
 
 
 def read_corpus(path, num_test_symbols=5000000):
@@ -144,171 +139,18 @@ def copy_model(model):
 
 
 def main(args):
-    log_path = "{}_{}".format(args.log, random.randint(1, 100))
-    train_writer = SummaryWriter(log_dir=log_path + "/train")
-    dev_writer = SummaryWriter(log_dir=log_path + "/dev")
-
     train, dev, test, words = read_corpus(args.data)
     dev_, test_ = dev, test
-    train = create_batches(train, args.batch_size)
-    dev = create_batches(test, args.batch_size)
+    # train = create_batches(train, args.batch_size)
+    dev = create_batches(dev, args.batch_size)
     test = create_batches(test, args.batch_size)
 
     model = Model(words, args)
+    model.cuda()
+    flop.make_projected_linear_with_mask(model.rnn, in_place=True)
     if args.load:
         model.load_state_dict(torch.load(args.load))
-    model.cuda()
-    print(model)
-    print("vocab size: {}".format(model.n_V))
 
-    lr = 1.0 if not args.noam else 1.0 / (args.n_d ** 0.5) / (args.warmup_steps ** 1.5)
-    if args.prune:
-        model.cuda()
-        print(model)
-        num_mask_params = sum(x.numel() for x in model.rnn.parameters())
-        num_prunable_params = num_mask_params
-        print("num of mask parameters: {}".format(num_mask_params))
-        print("num of prunable parameters: {}".format(num_prunable_params))
-        param_names = [
-            i[0]
-            for i in model.rnn.named_parameters()
-            if i[1].requires_grad
-        ]
-        pruner = flop.NervanaPruner(
-            model.rnn,
-            subpruners={
-                "agppruner": {
-                    "class": "AutomatedGradualPruner",
-                    "initial_sparsity": 0.05,
-                    "weights": param_names,
-                    "final_sparsity": args.prune_sparsity,
-                    "starting_step": args.prune_start_epoch,
-                    "ending_step": args.prune_end_epoch,
-                    "frequency": 1,
-                }
-            },
-        )
-    else:
-        args.prune_start_epoch = args.max_epoch
-
-    m_parameters = [
-        i[1]
-        for i in model.named_parameters()
-        if i[1].requires_grad
-    ]
-    optimizer = Adam(m_parameters, lr=lr * args.lr, weight_decay=args.weight_decay)
-    num_params = sum(x.numel() for x in m_parameters if x.requires_grad)
-    print("num of parameters: {}".format(num_params))
-
-    nbatch = 1
-    niter = 1
-    best_dev = 1e8
-    unroll_size = args.unroll_size
-    batch_size = args.batch_size
-    N = (len(train[0]) - 1) // unroll_size + 1
-    criterion = nn.CrossEntropyLoss()
-
-    model.zero_grad()
-
-    for epoch in range(args.max_epoch):
-        start_time = time.time()
-        model.train()
-        hidden = model.init_hidden(batch_size)
-
-        pruner.begin_step(epoch)
-        for i in range(N):
-            # start iter on the first batch
-            if nbatch % args.update_param_freq == 1:
-                pruner.begin_iter(epoch, niter, N // args.update_param_freq)
-
-            x = train[0][i * unroll_size : (i + 1) * unroll_size]
-            y = train[1][i * unroll_size : (i + 1) * unroll_size].view(-1)
-            hidden.detach_()
-
-            # language model forward and backward
-            output, hidden = model(x, hidden)
-            model_loss = criterion(output, y)
-
-            loss = model_loss
-            (loss / args.update_param_freq).backward()
-            model_loss = model_loss.item()
-
-            #  log training stats
-            if (niter - 1) % 100 == 0 and nbatch % args.update_param_freq == 0:
-                sys.stderr.write(
-                    "\r{:.4f}".format(
-                        model_loss,
-                    )
-                )
-                train_writer.add_scalar("loss/lm_loss", model_loss, niter)
-                train_writer.add_scalar(
-                    "parameter_norm", calc_norm([x.data for x in m_parameters]), niter
-                )
-                train_writer.add_scalar(
-                    "gradient_norm",
-                    calc_norm([x.grad for x in m_parameters if x.grad is not None]),
-                    niter,
-                )
-
-            #  perform gradient decent every few number of backward()
-            if nbatch % args.update_param_freq == 0:
-                if args.clip_grad > 0:
-                    torch.nn.utils.clip_grad_norm(m_parameters, args.clip_grad)
-                optimizer.step()
-                #  clear gradient
-                model.zero_grad()
-
-                # End iter on the last batch
-                pruner.end_iter(epoch, niter, N // args.update_param_freq)
-                niter += 1
-
-            if nbatch % args.log_period == 0 or i == N - 1:
-                elapsed_time = (time.time() - start_time) / 60.0
-                dev_ppl, dev_loss = eval_model(model, dev)
-                dev_writer.add_scalar("loss/lm_loss", dev_loss, niter)
-                dev_writer.add_scalar("bpc", np.log2(dev_ppl), niter)
-                sparsity = 0
-                if args.prune:
-                    agp_sparsity = pruner.get_step_logs()['sparsity']
-                    dev_writer.add_scalar("sparsity/hard_sparsity", agp_sparsity, niter)
-                    # dev_writer.add_scalar("sparsity/agp_sparsity", agp_sparsity, niter)
-                    dev_writer.add_scalar(
-                        "model_size/total_prunable", num_prunable_params, niter
-                    )
-                    dev_writer.add_scalar("model_size/total", num_params, niter)
-                sys.stdout.write(
-                    "\rIter={}  lr={:.5f}  train_loss={:.4f}  dev_loss={:.4f}"
-                    "  dev_bpc={:.2f}  sparsity={:.2f}\teta={:.1f}m\t[{:.1f}m]\n".format(
-                        niter,
-                        optimizer.param_groups[0]["lr"],
-                        loss,
-                        dev_loss,
-                        np.log2(dev_ppl),
-                        sparsity,
-                        elapsed_time * N / (i + 1),
-                        elapsed_time,
-                    )
-                )
-
-                checkpoint = copy_model(model)
-                sys.stdout.write("\n")
-                sys.stdout.flush()
-
-            nbatch += 1
-            if args.noam:
-                lr = min(1.0 / (niter ** 0.5), niter / (args.warmup_steps ** 1.5))
-                optimizer.param_groups[0]["lr"] = lr * args.lr / (args.n_d ** 0.5)
-
-        pruner.end_step(epoch)
-        if args.save and (epoch + 1) % 10 == 0:
-            torch.save(
-                checkpoint, "{}.{}.{:.3f}.pt".format(args.save, epoch + 1, sparsity)
-            )
-
-    train_writer.close()
-    dev_writer.close()
-
-    model.load_state_dict(checkpoint)
     model.cuda()
     dev = create_batches(dev_, 1)
     test = create_batches(test_, 1)
@@ -357,9 +199,9 @@ if __name__ == "__main__":
     argparser.add_argument("--l1_lambda", type=float, default=0)
 
     args = argparser.parse_args()
-    args.log = os.path.join(flambe.logging.get_trial_dir(), "script_logs")
-    args.save = os.path.join(flambe.logging.get_trial_dir(), "script_checkpoints")
-    os.makedirs(args.log, exist_ok=True)
-    os.makedirs(args.save, exist_ok=True)
-    print(args)
+    # args.log = os.path.join(flambe.logging.get_trial_dir(), "script_logs")
+    # args.save = os.path.join(flambe.logging.get_trial_dir(), "script_checkpoints")
+    # os.makedirs(args.log, exist_ok=True)
+    # os.makedirs(args.save, exist_ok=True)
+    # print(args)
     main(args)

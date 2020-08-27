@@ -249,7 +249,9 @@ class HardConcreteProjectedLinear(Module):
         elif self.compiled_weight is not None and self.compiled_weight_proj is not None:
             if isinstance(self.compiled_weight, int) and self.compiled_weight == -1:
                 return params
-            params += len(self.compiled_weight.view(-1)) + len(self.compiled_weight_proj.view(-1))
+            params += len(self.compiled_weight.view(-1)) + len(
+                self.compiled_weight_proj.view(-1)
+            )
         return params
 
     def forward(self, data: torch.Tensor, **kwargs) -> torch.Tensor:  # type: ignore
@@ -505,8 +507,9 @@ class ProjectedLinearWithMask(Module):
         in_features: int,
         out_features: int,
         bias: bool = True,
-        epsilon: float = 1e-4,
+        epsilon: float = 1e-6,
         proj_features: Optional[int] = None,
+        init_zero: bool = False,
     ) -> None:
         """Initialize a HardConcreteProjectedLinear module.
 
@@ -539,6 +542,7 @@ class ProjectedLinearWithMask(Module):
         self.weight_proj = nn.Parameter(torch.zeros(proj_features, out_features))  # type: ignore
         self.mask = nn.Parameter(torch.ones(proj_features))  # type: ignore
         self.epsilon = epsilon
+        self.init_zero = init_zero
 
         if bias:
             self.bias = nn.Parameter(torch.zeros(out_features))  # type: ignore
@@ -546,10 +550,17 @@ class ProjectedLinearWithMask(Module):
             self.register_parameter("bias", None)  # type: ignore
 
         self.reset_parameters()
+        self.compiled_weight = None
+        self.compiled_weight_proj = None
+        self.indices = None
 
     @classmethod
     def from_module(
-        cls, module: ProjectedLinear, epsilon: float = 1e-4, keep_weights: bool = True
+        cls,
+        module: ProjectedLinear,
+        epsilon: float = 1e-6,
+        keep_weights: bool = True,
+        init_zero: bool = False,
     ) -> "HardConcreteProjectedLinear":
         """Construct from a pretrained ProjectedLinear module.
 
@@ -577,7 +588,7 @@ class ProjectedLinearWithMask(Module):
         out_features = module.out_features
         bias = module.linear2.bias is not None
         proj_features = module.proj_features
-        new_module = cls(in_features, out_features, bias, epsilon, proj_features)
+        new_module = cls(in_features, out_features, bias, epsilon, proj_features, init_zero)
 
         if keep_weights:
             new_module.weight.data = module.linear1.weight.data.transpose(0, 1).clone()
@@ -594,6 +605,8 @@ class ProjectedLinearWithMask(Module):
         nn.init.xavier_uniform_(self.weight)
         nn.init.xavier_uniform_(self.weight_proj)
 
+        if self.init_zero:
+            nn.init.uniform_(self.mask, -1, 1)
         if self.bias is not None:
             fan_in, _ = nn.init._calculate_fan_in_and_fan_out(self.weight)
             bound = 1 / math.sqrt(fan_in)
@@ -643,9 +656,19 @@ class ProjectedLinearWithMask(Module):
             self.compiled_weight_proj = None
             self.indices = None
 
-            # Sample, and compile dynamically
-            weight_proj = self.weight_proj * self.mask.view(-1, 1)
-            U = data.matmul(self.weight).matmul(weight_proj)
+            # Perform index select
+            mask = self.mask.data.abs() > self.epsilon
+            indices = mask.nonzero().view(-1)
+
+            # Compute new subweight
+            if len(indices) > 0:  # type: ignore
+                compiled_weight = self.weight.index_select(1, indices)  # type: ignore
+                weight_proj = self.weight_proj * self.mask.view(-1, 1)
+                compiled_weight_proj = weight_proj.index_select(0, indices)
+                U = data.matmul(compiled_weight).matmul(compiled_weight_proj)
+            else:
+                output_size = data.size()[:-1] + (self.out_features,)
+                U = data.new(size=output_size).zero_()  # type: ignore
         else:
             if self.compiled_weight is None:
                 mask = self.mask.data.abs() > self.epsilon

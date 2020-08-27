@@ -9,17 +9,28 @@ name: jeremy-enwiki-l1
 
 resources:
   data_file: /Users/jeremy/Downloads/enwik8
-  checkpoint: /Users/jeremy/Downloads/enwik8_sru_6_3056_512_lr2_wm16k.30.pt
+  # checkpoint: /Users/jeremy/Downloads/enwik8_sru_6_3056_512_lr2_wm16k.30.pt
 
 pipeline:
+
+  prune_normal: !Script
+    script: flop.scripts.enwik8.train_enwik8_agp_struct
+    args: []
+    kwargs:
+      warmup_steps: 4000
+      prune_sparsity: 0
+      l1_lambda: 0
+      data: !@ data_file
+      prune: 0
+      # load: !@ checkpoint
 
   prune_large: !Script
     script: flop.scripts.enwik8.train_enwik8_agp_struct
     args: []
     kwargs:
       warmup_steps: 4000
-      prune_end_epoch: 40
-      l1_lambda: 0.00001
-      prune_sparsity: !g [0.7, 0.8, 0.9]
+      prune_end_epoch: !g [1, 5]
+      prune_sparsity: 0.8
+      l1_lambda: 0
       data: !@ data_file
-      load: !@ checkpoint
+      # load: !@ checkpoint

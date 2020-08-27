@@ -1,0 +1,51 @@
+flop: /Users/jeremy/Documents/asapp/flop2
+distiller: /Users/jeremy/Documents/asapp/distiller
+
+---
+
+!Experiment
+
+name: jeremy-enwiki-scratch
+
+resources:
+  data_file: /Users/jeremy/Downloads/enwik8
+  # checkpoint: /Users/jeremy/Downloads/enwik8_sru_6_3056_512_lr2_wm16k.30.pt
+
+pipeline:
+
+  prune_later: !Script
+    script: flop.scripts.enwik8.test_fast_pruning
+    args: []
+    kwargs:
+      warmup_steps: 4000
+      prune_start_epoch: 1
+      prune_end_epoch: 100
+      prune_sparsity: 0.8
+      l1_lambda: 0
+      data: !@ data_file
+      max_epoch: 100
+
+  # prune_early: !Script
+  #   script: flop.scripts.enwik8.test_fast_pruning
+  #   args: []
+  #   kwargs:
+  #     warmup_steps: 4000
+  #     prune_start_epoch: 2
+  #     prune_end_epoch: !g [4, 5, 7, 12]
+  #     prune_sparsity: 0.8
+  #     l1_lambda: 0
+  #     data: !@ data_file
+  #     max_epoch: 30
+      # load: !@ checkpoint
+
+  # baseline: !Script
+  #   script: flop.scripts.enwik8.test_fast_pruning
+  #   args: []
+  #   kwargs:
+  #     warmup_steps: 4000
+  #     prune_start_epoch: 100
+  #     prune_end_epoch: 101
+  #     l1_lambda: 0
+  #     data: !@ data_file
+  #     max_epoch: 20
+  #     # load: !@ checkpoint

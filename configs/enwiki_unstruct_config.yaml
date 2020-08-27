@@ -5,23 +5,20 @@ distiller: /Users/jeremy/Documents/asapp/distiller
 
 !Experiment
 
-name: wiki103-unstruct
+name: jeremy-enwiki-unstruct
 
 resources:
-  data_file: !cluster s3://asapp-mlresearch/tao/wikitext-103-v1.zip
-  checkpoint: !cluster s3://asapp-mlresearch/tao/wt103_sru_12_2048_512_lr2_wm4k.50.pt
-
-devices:
-  gpu: 4
+  data_file: /Users/jeremy/Downloads/enwik8
+  checkpoint: /Users/jeremy/Downloads/enwik8_sru_6_3056_512_lr2_wm16k.30.pt
 
 pipeline:
 
   prune_large: !Script
-    script: flop.scripts.wt103.train_agp_unstruct
+    script: flop.scripts.enwik8.train_enwik8_agp_unstruct
     args: []
     kwargs:
       warmup_steps: 4000
       prune_end_epoch: 20
-      prune_sparsity: !g [0.7, 0.8]
+      prune_sparsity: !g [0.7, 0.8, 0.9]
       data: !@ data_file
       load: !@ checkpoint

@@ -92,7 +92,7 @@ def make_hard_concrete(
 
 
 def make_projected_linear_with_mask(
-    module: nn.Module, in_place: bool = True,
+    module: nn.Module, in_place: bool = True, init_zero: bool = False
 ) -> nn.Module:
     """Replace all ProjectedLinear with ProjectedLinearWithMask.
 
@@ -115,13 +115,12 @@ def make_projected_linear_with_mask(
         if isinstance(child, ProjectedLinear):
             modules.append((name, child))
         else:
-            make_projected_linear_with_mask(child, in_place)
+            make_projected_linear_with_mask(child, in_place, init_zero=init_zero)
 
     # Replace all modules found
     new_module = module if in_place else deepcopy(module)
     for name, child in modules:
-        new_child = ProjectedLinearWithMask.from_module(child)
-        delattr(new_module, name)
+        new_child = ProjectedLinearWithMask.from_module(child, init_zero=init_zero)
         setattr(new_module, name, new_child)
 
     return new_module

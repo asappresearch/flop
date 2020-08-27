@@ -4,13 +4,13 @@ flambe_asapp: flambe-asapp==0.1.23
 
 !flambe_asapp.ASAPPCluster
 
-name: jeremy-wiki103-l1-2
+name: jeremy-enwiki-tf-2
 
 factories_num: 1
 factories_type: p3.16xlarge
 orchestrator_type: t3.xlarge
 orchestrator_timeout: -1
-factories_timeout: 1
+factories_timeout: -1
 
 creator: jeremy@asapp.com
 key_name: research-2017sep
