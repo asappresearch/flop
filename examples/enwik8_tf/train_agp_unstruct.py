@@ -13,10 +13,11 @@ import torch.optim as optim
 import flop
 from tensorboardX import SummaryWriter
 
-from flop.scripts.enwik8_tf.data_utils import get_lm_corpus
-from flop.scripts.enwik8_tf.mem_transformer import MemTransformerLM
-from flop.scripts.enwik8_tf.utils.exp_utils import create_exp_dir
-from flop.scripts.enwik8_tf.utils.data_parallel import BalancedDataParallel
+from .data_utils import get_lm_corpus
+from .mem_transformer import MemTransformerLM
+from .utils.exp_utils import create_exp_dir
+from .utils.data_parallel import BalancedDataParallel
+
 
 parser = argparse.ArgumentParser(description="PyTorch Transformer Language Model")
 parser.add_argument(
@@ -463,18 +464,17 @@ elif args.optim.lower() == "adagrad":
     optimizer = optim.Adagrad(model.parameters(), lr=args.lr)
 
 if args.prune:
-    hc_linear_modules = flop.get_projected_linear_with_mask_modules(model)
-    num_prunable_params = sum(m.num_prunable_parameters() for m in hc_linear_modules)
-    mask_params = flop.get_projected_linear_masks(model)
+    num_mask_params = sum(x.numel() for x in model.layers.parameters())
+    num_prunable_params = num_mask_params
     print("num of prunable parameters: {}".format(num_prunable_params))
 
     mask_param_names = [
-        i[0]
-        for i in para_model.named_parameters()
-        if i[1].requires_grad and "mask" in i[0]
+        f"layers.{i[0]}"
+        for i in model.layers.named_parameters()
+        if i[1].requires_grad
     ]
     pruner = flop.NervanaPruner(
-        para_model,
+        model,
         subpruners={
             "agppruner": {
                 "class": "AutomatedGradualPruner",
@@ -626,27 +626,7 @@ def train(epoch):
         model_loss, mems = ret[0], ret[1:]
         model_loss = model_loss.float().mean().type_as(model_loss)
 
-        if args.prune:
-            # compute target sparsity
-            target_sparsity = args.prune_sparsity
-            if args.prune_warmup > 0:
-                target_sparsity *= min(1.0, train_step / args.prune_warmup)
-
-            # compute expected sparsity
-            expected_size = sum(m.num_parameters(train=True) for m in hc_linear_modules)
-            expected_sparsity = 1.0 - expected_size / num_prunable_params
-
-            l1_loss_aggr = 0
-            if args.l1_lambda > 0 and expected_sparsity < args.prune_sparsity:
-                for p in mask_params:
-                    l1_loss_aggr += torch.sum(torch.abs(p))
-
-            l1_loss = args.l1_lambda * l1_loss_aggr
-
-        if args.l1_lambda > 0:
-            loss = model_loss + l1_loss
-        else:
-            loss = model_loss
+        loss = model_loss
 
         if args.fp16:
             optimizer.backward(loss)
@@ -704,15 +684,6 @@ def train(epoch):
                 log_str += " | ppl {:9.3f}".format(math.exp(cur_loss))
 
             train_writer.add_scalar("loss/lm_loss", cur_loss, train_step)
-            if args.prune:
-                train_writer.add_scalar(
-                    "sparsity/expected_sparsity", expected_sparsity, train_step
-                )
-                train_writer.add_scalar(
-                    "sparsity/target_sparsity", target_sparsity, train_step
-                )
-                log_str += " | tsp {:4.2f}".format(target_sparsity)
-                log_str += " | esp {:4.2f}".format(expected_sparsity)
 
             logging(log_str)
             train_loss = 0
@@ -740,11 +711,9 @@ def train(epoch):
             dev_writer.add_scalar("loss/lm_loss", val_loss, train_step)
             dev_writer.add_scalar("bpc", val_loss / math.log(2), train_step)
             if args.prune:
-                pruned_size = sum(
-                    m.num_parameters(train=False) for m in hc_linear_modules
-                )
-                sparsity = 1.0 - pruned_size / num_prunable_params
-                dev_writer.add_scalar("sparsity/hard_sparsity", sparsity, train_step)
+                agp_sparsity = pruner.get_step_logs()['sparsity']
+                pruned_size = int(agp_sparsity * num_prunable_params)
+                dev_writer.add_scalar("sparsity/hard_sparsity", agp_sparsity, train_step)
                 dev_writer.add_scalar(
                     "model_size/total_prunable", num_prunable_params, train_step
                 )

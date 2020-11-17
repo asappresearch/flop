@@ -5,12 +5,11 @@ import math
 
 import torch
 import torch.nn as nn
-from flambe.nn import Module
 
 from .hardconcrete import HardConcrete
 
 
-class ProjectedLinear(Module):
+class ProjectedLinear(nn.Module):
     """Linear layer with an internal projection."""
 
     def __init__(
@@ -115,7 +114,7 @@ class ProjectedLinear(Module):
         return "{}({})".format(self.__class__.__name__, self.extra_repr())
 
 
-class HardConcreteProjectedLinear(Module):
+class HardConcreteProjectedLinear(nn.Module):
     """The hard concrete equivalent of ``ProjectedLinear``."""
 
     def __init__(
@@ -321,7 +320,7 @@ class HardConcreteProjectedLinear(Module):
         return "{}({})".format(self.__class__.__name__, self.extra_repr())
 
 
-class HardConcreteLinear(Module):
+class HardConcreteLinear(nn.Module):
     """The hard concrete equivalent of ``nn.Linear``."""
 
     def __init__(
@@ -495,7 +494,7 @@ class HardConcreteLinear(Module):
         return "{}({})".format(self.__class__.__name__, self.extra_repr())
 
 
-class ProjectedLinearWithMask(Module):
+class ProjectedLinearWithMask(nn.Module):
     """ProjectedLinear with a diagonal mask to apply regulaization on.
 
     This object is used to compute the L1 and AGP baselines.

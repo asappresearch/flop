@@ -13,10 +13,9 @@ from tensorboardX import SummaryWriter
 
 import sru
 import flop
-import flambe
-from flambe.optim import RAdam
 from flop.embedding import AdaptiveEmbedding, AdaptiveLogSoftmax
-from flop.scripts.wt103.utils.data_utils import get_lm_corpus
+from flop.embedding import AdaptiveEmbeddingWithMask, AdaptiveLogSoftmaxWithMask
+from .utils.data_utils import get_lm_corpus
 
 
 class Model(nn.Module):
@@ -192,11 +191,33 @@ def main(args):
         model.load_state_dict(torch.load(args.load))
     lr = 1.0 if not args.noam else 1.0 / (args.n_d ** 0.5) / (args.warmup_steps ** 1.5)
     if args.prune:
+        # in place substituion of linear ops in SRU
+        flop.make_projected_linear_with_mask(
+            model.rnn, in_place=True
+        )
+        model.embedding_layer = AdaptiveEmbeddingWithMask.from_module(
+            model.embedding_layer
+        )
+        model.output_layer = AdaptiveLogSoftmaxWithMask.from_module(
+            model.output_layer
+        )
         # tie weights again
         model.tie_weights()
         model.to(device)
-        num_mask_params = sum(x.numel() for x in model.parameters())
-        num_prunable_params = num_mask_params
+        mask_params = list(flop.get_projected_linear_masks(model.rnn))
+        for param in model.embedding_layer.masks:
+            mask_params.append(param)
+
+        optimizer_pm = torch.optim.Adam(mask_params, lr=lr * args.prune_lr, weight_decay=0)
+
+        mask_modules = flop.get_projected_linear_with_mask_modules(model) + [
+            model.embedding_layer
+        ]
+
+        num_mask_params = sum(x.numel() for x in mask_params)
+        num_prunable_params = sum(
+            m.num_prunable_parameters() for m in mask_modules
+        )
         if local_rank == 0:
             print("num of mask parameters: {}".format(num_mask_params))
             print("num of prunable parameters: {}".format(num_prunable_params))
@@ -204,7 +225,7 @@ def main(args):
         mask_param_names = [
             i[0]
             for i in model.named_parameters()
-            if i[1].requires_grad
+            if i[1].requires_grad and "mask" in i[0]
         ]
         pruner = flop.NervanaPruner(
             model,
@@ -214,7 +235,7 @@ def main(args):
                     "initial_sparsity": 0.05,
                     "weights": mask_param_names,
                     "final_sparsity": args.prune_sparsity,
-                    "starting_step": args.prune_start_epoch,
+                    "starting_step": args.prune_start_epoch + 1,
                     "ending_step": args.prune_end_epoch,
                     "frequency": 1,
                 }
@@ -227,16 +248,17 @@ def main(args):
     m_parameters = [
         i[1]
         for i in model.named_parameters()
-        if i[1].requires_grad
+        if i[1].requires_grad and "mask" not in i[0]
     ]
-    optimizer = RAdam(m_parameters, lr=lr * args.lr, weight_decay=args.weight_decay)
+    optimizer = torch.optim.Adam(m_parameters, lr=lr * args.lr, weight_decay=args.weight_decay)
     num_params = sum(x.numel() for x in m_parameters if x.requires_grad)
 
     model_ = model
+    model = nn.DataParallel(model, dim=1).to('cuda')
     # model = torch.nn.parallel.DistributedDataParallel(
     #     model, dim=1, device_ids=[local_rank], output_device=local_rank,
     # )
-    model = nn.DataParallel(model, dim=1).to('cuda')
+
     nbatch = 1
     niter = 1
     best_dev = 1e8
@@ -250,15 +272,17 @@ def main(args):
         print("num of mini-batches: {}".format(N))
 
     model.zero_grad()
+    if args.prune:
+        optimizer_pm.zero_grad()
 
     for epoch in range(args.max_epoch):
         start_time = time.time()
         model.train()
         hidden = model_.init_hidden(batch_size)
+        start_prune = epoch >= args.prune_start_epoch
         i = 0
 
         pruner.begin_step(epoch)
-
         for x, y, seq_len in train:
             # start iter on the first batch
             if nbatch % args.update_param_freq == 1:
@@ -269,12 +293,34 @@ def main(args):
 
             # language model forward and backward
             model_loss, hidden = model(x, y, hidden)
+            l1_loss = 0
+            expected_sparsity = 0
+
+            # add lagrangian loss (regularization) when pruning
+            if start_prune:
+                # compute expected model size and sparsity
+                expected_size = sum(
+                    m.num_parameters(train=True) for m in mask_modules
+                )
+                expected_sparsity = 1.0 - expected_size / num_prunable_params
+                expected_sparsity = expected_sparsity.item()
+
+                l1_loss_aggr = 0
+                if args.l1_lambda > 0 and expected_sparsity < args.prune_sparsity:
+                    for p in mask_params:
+                        l1_loss_aggr += torch.sum(torch.abs(p))
+
+                l1_loss = args.l1_lambda * l1_loss_aggr
 
             model_loss = model_loss.mean()
-            loss = model_loss
+            if args.l1_lambda > 0:
+                loss = model_loss + l1_loss
+            else:
+                loss = model_loss
 
             (loss / args.update_param_freq).backward()
             model_loss = model_loss.item()
+            l1_loss = l1_loss.item() if isinstance(l1_loss, torch.Tensor) else l1_loss
 
             #  log training stats
             if (
@@ -282,21 +328,31 @@ def main(args):
                 and (niter - 1) % 100 == 0
                 and nbatch % args.update_param_freq == 0
             ):
+                if args.prune:
+                    train_writer.add_scalar(
+                        "sparsity/expected_sparsity", expected_sparsity, niter
+                    )
+                    train_writer.add_scalar(
+                        "loss/l1_loss", l1_loss, niter
+                    )
                 sys.stderr.write(
-                    "\r{:.4f} eta={:.1f}m".format(
+                    "\r{:.4f} {:.2f} {:.2f} eta={:.1f}m".format(
                         math.exp(model_loss),
+                        l1_loss,
+                        expected_sparsity,
                         (time.time() - start_time) / 60.0 / (i + 1) * (N - i - 1),
                     )
                 )
                 train_writer.add_scalar("loss/ppl", math.exp(model_loss), niter)
+                train_writer.add_scalar("loss/lm_loss", model_loss, niter)
                 train_writer.add_scalar(
-                    "loss/total_loss", model_loss, niter
+                    "loss/total_loss", model_loss + l1_loss, niter
                 )
                 train_writer.add_scalar(
                     "parameter_norm", calc_norm([x.data for x in m_parameters]), niter
                 )
                 train_writer.add_scalar(
-                    "gradieånt_norm",
+                    "gradient_norm",
                     calc_norm([x.grad for x in m_parameters if x.grad is not None]),
                     niter,
                 )
@@ -306,8 +362,12 @@ def main(args):
                 if args.clip_grad > 0:
                     torch.nn.utils.clip_grad_norm(m_parameters, args.clip_grad)
                 optimizer.step()
+                if start_prune:
+                    optimizer_pm.step()
                 #  clear gradient
                 model.zero_grad()
+                if args.prune:
+                    optimizer_pm.zero_grad()
 
                 # End iter on the last batch
                 pruner.end_iter(epoch, niter, N // args.update_param_freq)
@@ -321,12 +381,35 @@ def main(args):
                 dev_writer.add_scalar("ppl", dev_ppl, niter)
                 sparsity = 0
                 if args.prune:
-                    agp_sparsity = pruner.get_step_logs()['sparsity']
-                    dev_writer.add_scalar("sparsity/hard_sparsity", agp_sparsity, niter)
+                    pruned_size = sum(
+                        m.num_parameters(train=False) for m in mask_modules
+                    )
+                    sparsity = 1.0 - pruned_size / num_prunable_params
+                    # agp_sparsity = pruner.get_step_logs()
+                    dev_writer.add_scalar("sparsity/hard_sparsity", sparsity, niter)
+                    # dev_writer.add_scalar("sparsity/agp_sparsity", agp_sparsity, niter)
                     dev_writer.add_scalar(
                         "model_size/total_prunable", num_prunable_params, niter
                     )
+                    dev_writer.add_scalar(
+                        "model_size/current_prunable", pruned_size, niter
+                    )
                     dev_writer.add_scalar("model_size/total", num_params, niter)
+                    dev_writer.add_scalar(
+                        "model_size/current",
+                        num_params - num_prunable_params + pruned_size,
+                        niter,
+                    )
+                    dev_writer.add_scalar(
+                        "model_size/current_embedding",
+                        model_.embedding_layer.num_parameters(train=False),
+                        niter,
+                    )
+                    dev_writer.add_scalar(
+                        "model_size/current_output_layer",
+                        model_.output_layer.num_parameters(train=False),
+                        niter,
+                    )
                 sys.stdout.write(
                     "\rnum_batches={}  lr={:.5f}  train_loss={:.4f}  dev_loss={:.4f}"
                     "  dev_bpc={:.2f}  sparsity={:.2f}\t[{:.1f}m]\n".format(
@@ -347,6 +430,10 @@ def main(args):
             if args.noam:
                 lr = min(1.0 / (niter ** 0.5), niter / (args.warmup_steps ** 1.5))
                 optimizer.param_groups[0]["lr"] = lr * args.lr / (args.n_d ** 0.5)
+            if args.noam and start_prune:
+                niter_ = niter - args.prune_start_epoch * N
+                lr = min(1.0 / (niter_ ** 0.5), niter_ / (args.warmup_steps ** 1.5))
+                optimizer_pm.param_groups[0]["lr"] = lr * args.lr / (args.n_d ** 0.5)
 
         pruner.end_step(epoch)
         if local_rank == 0 and args.save and (epoch + 1) % 10 == 0:
@@ -421,9 +508,6 @@ if __name__ == "__main__":
 
     argparser.add_argument("--local_rank", type=int, default=0)
     args = argparser.parse_args()
-    args.log = os.path.join(flambe.logging.get_trial_dir(), "script_logs")
-    args.save = os.path.join(flambe.logging.get_trial_dir(), "script_checkpoints")
-
     dirname = os.path.dirname(args.data)
     with zipfile.ZipFile(args.data, 'r') as f:
         f.extractall(dirname)

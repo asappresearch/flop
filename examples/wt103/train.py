@@ -15,19 +15,10 @@ from tensorboardX import SummaryWriter
 
 import sru
 import flop
-from flambe.optim import RAdam
 from flop.embedding import AdaptiveEmbedding, AdaptiveLogSoftmax
 from flop.embedding import HardConcreteAdaptiveEmbedding, HardConcreteAdaptiveLogSoftmax
 from utils.data_utils import get_lm_corpus
 
-class CustomLinear(nn.Linear):
-    def __init__(self, in_features, out_features, bias=False):
-        super(CustomLinear, self).__init__(
-                in_features, out_features, bias=bias
-            )
-
-    def forward(self, data, **kwargs):
-        return super().forward(data)
 
 class Model(nn.Module):
     def __init__(self, args):
@@ -46,15 +37,17 @@ class Model(nn.Module):
             self.cutoffs,
             div_val=args.div_val,
             div_freq=2,
-            dropout=args.dropout_e
+            dropout=0.1
         )
         self.rnn = sru.SRU(self.n_d, self.n_d, self.depth,
+            projection_size=args.n_proj,
             dropout=args.dropout,
             highway_bias=args.bias,
             layer_norm=args.layer_norm,
             rescale=args.rescale,
-            custom_m=CustomLinear(
+            custom_m=flop.ProjectedLinear(
                 self.n_d, self.n_d * 3,
+                proj_features=args.n_proj,
                 bias=False
             )
         )
@@ -64,7 +57,7 @@ class Model(nn.Module):
             self.cutoffs,
             div_val=args.div_val,
             div_freq=2,
-            dropout=args.dropout_e,
+            dropout=0.1,
             keep_order=False
         )
         self.init_weights()
@@ -114,7 +107,7 @@ def calc_norm(lis):
 
 def eval_model(model, valid):
     with torch.no_grad():
-        # Important: reset compiled masks. When multiple GPUs are used, model() and DDP model()
+        # Important: reset compiled masks. When multiple GPUs are used, model() and para_model()
         # are not the same instance although they share the same parameters.
         # Calling model(..) in training mode will reset all compiled weights and cached masks
         for x, y, seq_len in valid:
@@ -142,47 +135,30 @@ def copy_model(model):
         states[k] = v.clone().cpu()
     return states
 
-def set_seed(seed):
-    random.seed(seed)
-    np.random.seed(seed)
-    torch.manual_seed(seed)
-    torch.cuda.manual_seed_all(seed)
-
 def main(args):
+    log_path = "{}_{}".format(args.log, random.randint(1,100))
+    train_writer = SummaryWriter(log_dir=log_path+"/train")
+    dev_writer = SummaryWriter(log_dir=log_path+"/dev")
 
-    if args.local_rank == 0:
-        log_path = "{}_{}".format(args.log, random.randint(1,100))
-        train_writer = SummaryWriter(log_dir=log_path+"/train")
-        dev_writer = SummaryWriter(log_dir=log_path+"/dev")
-
-    # set up distributed training
-    torch.cuda.set_device(args.local_rank)
-    device = torch.device("cuda", args.local_rank)
-    torch.distributed.init_process_group(backend="nccl")
-    set_seed(1234)
-    args.n_gpu = 1
-    args.device = device
-    local_rank = args.local_rank
-
+    device = torch.device('cuda')
     corpus = get_lm_corpus(args.data, 'wt103')
     n_token = args.n_token = len(corpus.vocab)
     args.eval_batch_size = args.eval_batch_size or args.batch_size
     args.eval_unroll_size = args.eval_unroll_size or args.unroll_size
-    unroll_size = args.unroll_size
-    eval_unroll_size = args.eval_unroll_size
-    batch_size = args.batch_size
-    eval_batch_size = args.eval_batch_size
-    n_nodes = torch.cuda.device_count()
-    train = corpus.get_distributed_iterator('train', batch_size,
-                                            unroll_size, n_nodes=n_nodes,
-                                            rank=local_rank, device=device)
-    dev = corpus.get_iterator('valid', eval_batch_size, eval_unroll_size, device=device)
-    if local_rank == 0:
-        print("vocab size: {}".format(n_token))
+    train = corpus.get_iterator('train', args.batch_size, args.unroll_size, device=device)
+    dev = corpus.get_iterator('valid', args.eval_batch_size, args.eval_unroll_size, device=device)
+    test = corpus.get_iterator('test', args.eval_batch_size, args.eval_unroll_size, device=device)
+    print("vocab size: {}".format(n_token))
 
     model = Model(args)
     if args.load:
         model.load_state_dict(torch.load(args.load))
+    model.cuda()
+    print(model)
+    if torch.cuda.device_count() > 1:
+        para_model = torch.nn.DataParallel(model, dim=1)#, output_device=1)
+    else:
+        para_model = model
     lr = 1.0 if not args.noam else 1.0/(args.n_d**0.5)/(args.warmup_steps**1.5)
     if args.prune:
         # in place substituion of linear ops in SRU
@@ -197,20 +173,23 @@ def main(args):
         )
         # tie weights again
         model.tie_weights()
-        model.to(device)
+        model.cuda()
+        print("model after inserting hardconcrete:")
+        print(model)
         hc_modules = flop.get_hardconcrete_modules(model.rnn) + flop.get_hardconcrete_modules(model.embedding_layer)
-        #print(len(flop.get_hardconcrete_modules(model)))
-        #print(len(hc_modules))
+        print(len(flop.get_hardconcrete_modules(model)))
+        print(len(hc_modules))
         hc_parameters = [p for m in hc_modules for p in m.parameters() if p.requires_grad]
-        optimizer_hc = RAdam(
+        optimizer_hc = Adam(
             hc_parameters,
             lr = lr * args.prune_lr,
             weight_decay = 0
         )
-
+        num_hardconcrete_params = sum(x.numel() for x in hc_parameters)
+        print("num of hardconcrete paramters: {}".format(num_hardconcrete_params))
         lambda_1 = nn.Parameter(torch.tensor(0.).cuda())
         lambda_2 = nn.Parameter(torch.tensor(0.).cuda())
-        optimizer_max = RAdam(
+        optimizer_max = Adam(
             [lambda_1, lambda_2],
             lr = lr,
             weight_decay = 0
@@ -218,31 +197,19 @@ def main(args):
         optimizer_max.param_groups[0]['lr'] = -lr * args.prune_lr
         hc_linear_modules = flop.get_hardconcrete_linear_modules(model) + \
                 [model.embedding_layer]
-
-        num_hardconcrete_params = sum(x.numel() for x in hc_parameters)
         num_prunable_params = sum(m.num_prunable_parameters() for m in hc_linear_modules)
-        if local_rank == 0:
-            print("num of hardconcrete paramters: {}".format(num_hardconcrete_params))
-            print("num of prunable paramters: {}".format(num_prunable_params))
+        print("num of prunable paramters: {}".format(num_prunable_params))
     else:
-        model.to(device)
         args.prune_start_epoch = args.max_epoch
 
     m_parameters = [i[1] for i in model.named_parameters() if i[1].requires_grad and 'log_alpha' not in i[0]]
-    optimizer = RAdam(
+    optimizer = Adam(
         m_parameters,
         lr = lr * args.lr,
         weight_decay = args.weight_decay
     )
     num_params = sum(x.numel() for x in m_parameters if x.requires_grad)
-
-    model_ = model
-    model = torch.nn.parallel.DistributedDataParallel(
-        model,
-        dim=1,
-        device_ids=[local_rank],
-        output_device=local_rank,
-    )
+    print("num of parameters: {}".format(num_params))
 
     nbatch = 1
     niter = 1
@@ -251,10 +218,7 @@ def main(args):
     batch_size = args.batch_size
     N = train.n_batch
     checkpoint = None
-    if local_rank == 0:
-        print(model)
-        print("num of parameters: {}".format(num_params))
-        print("num of mini-batches: {}".format(N))
+    print("num of mini-batches: {}".format(N))
 
     model.zero_grad()
     if args.prune:
@@ -265,7 +229,7 @@ def main(args):
         start_time = time.time()
         model.train()
         total_loss = 0.0
-        hidden = model_.init_hidden(batch_size)
+        hidden = model.init_hidden(batch_size)
         start_prune = epoch >= args.prune_start_epoch
         i = 0
 
@@ -274,7 +238,7 @@ def main(args):
             hidden.detach_()
 
             # language model forward and backward
-            loss, hidden = model(x, y, hidden)
+            loss, hidden = para_model(x, y, hidden)
             loss = loss.mean()
             (loss / args.update_param_freq).backward()
             loss = loss.item()
@@ -302,7 +266,7 @@ def main(args):
                 lagrangian_loss = lagrangian_loss.item()
 
             #  log training stats
-            if local_rank == 0 and (niter - 1) % 100 == 0 and nbatch % args.update_param_freq == 0:
+            if (niter - 1) % 100 == 0 and nbatch % args.update_param_freq == 0:
                 if args.prune:
                     train_writer.add_scalar('sparsity/expected_sparsity', expected_sparsity, niter)
                     train_writer.add_scalar('sparsity/target_sparsity', target_sparsity, niter)
@@ -350,9 +314,9 @@ def main(args):
                     optimizer_hc.zero_grad()
                 niter += 1
 
-            if local_rank == 0 and (nbatch % args.log_period == 0 or i == N):
+            if nbatch % args.log_period == 0 or i == N:
                 elapsed_time = (time.time()-start_time)/60.0
-                dev_ppl, dev_loss = eval_model(model_, dev)
+                dev_ppl, dev_loss = eval_model(model, dev)
                 dev_writer.add_scalar('loss/lm_loss', dev_loss, niter)
                 dev_writer.add_scalar('loss/ppl', dev_ppl, niter)
                 dev_writer.add_scalar('ppl', dev_ppl, niter)
@@ -369,11 +333,11 @@ def main(args):
                         niter
                     )
                     dev_writer.add_scalar('model_size/current_embedding',
-                        model_.embedding_layer.num_parameters(train=False),
+                        model.embedding_layer.num_parameters(train=False),
                         niter
                     )
                     dev_writer.add_scalar('model_size/current_output_layer',
-                        model_.output_layer.num_parameters(train=False),
+                        model.output_layer.num_parameters(train=False),
                         niter
                     )
                 sys.stdout.write("\rnum_batches={}  lr={:.5f}  train_loss={:.4f}  dev_loss={:.4f}"
@@ -388,7 +352,7 @@ def main(args):
                 ))
                 if dev_ppl < best_dev:
                     best_dev = dev_ppl
-                    checkpoint = copy_model(model_)
+                    checkpoint = copy_model(model)
                 sys.stdout.write("\n")
                 sys.stdout.flush()
 
@@ -402,7 +366,7 @@ def main(args):
                 optimizer_max.param_groups[0]['lr'] = -lr * args.prune_lr / (args.n_d**0.5)
                 optimizer_hc.param_groups[0]['lr'] = lr * args.lr / (args.n_d**0.5)
 
-        if local_rank == 0 and args.save and (epoch + 1) % 10 == 0:
+        if args.save and (epoch + 1) % 5 == 0:
             torch.save(checkpoint, "{}.{}.{}.pt".format(
                 args.save,
                 epoch + 1,
@@ -410,50 +374,47 @@ def main(args):
                 #sparsity
             ))
 
-    if local_rank == 0:
-        train_writer.close()
-        dev_writer.close()
+    train_writer.close()
+    dev_writer.close()
 
-        if checkpoint is not None:
-            model_.load_state_dict(checkpoint)
-            model_.to(device)
-        #dev = create_batches(dev_, 1)
-        #test = create_batches(test_, 1)
-        test = corpus.get_iterator('test', eval_batch_size, eval_unroll_size, device=device)
-        dev_ppl, dev_loss = eval_model(model_, dev)
-        test_ppl, test_loss = eval_model(model_, test)
-        sys.stdout.write("dev_ppl={:.3f}  test_ppl={:.3f}\n".format(
-            dev_ppl, test_ppl
-        ))
+    if checkpoint is not None:
+        model.load_state_dict(checkpoint)
+        model.cuda()
+    #dev = create_batches(dev_, 1)
+    #test = create_batches(test_, 1)
+    dev_ppl, dev_loss = eval_model(model, dev)
+    test_ppl, test_loss = eval_model(model, test)
+    sys.stdout.write("dev_ppl={:.3f}  test_ppl={:.3f}\n".format(
+        dev_ppl, test_ppl
+    ))
 
 if __name__ == "__main__":
     argparser = argparse.ArgumentParser(sys.argv[0], conflict_handler='resolve')
     argparser.add_argument("--log", type=str, required=True)
     argparser.add_argument("--noam", action="store_true")
-    argparser.add_argument("--warmup_steps", type=int, default=4000)
+    argparser.add_argument("--warmup_steps", type=int, default=32000)
     argparser.add_argument("--layer_norm", action="store_true")
     argparser.add_argument("--rescale", action="store_true")
     argparser.add_argument("--not_tie", action="store_true")
     argparser.add_argument("--data", type=str, required=True, help="training file")
     argparser.add_argument("--update_param_freq", type=int, default=1)
-    argparser.add_argument("--batch_size", "--batch", type=int, default=24)
+    argparser.add_argument("--batch_size", "--batch", type=int, default=64)
     argparser.add_argument("--eval_batch_size", type=int, default=10)
-    argparser.add_argument("--unroll_size", type=int, default=256)
+    argparser.add_argument("--unroll_size", type=int, default=128)
     argparser.add_argument("--eval_unroll_size", type=int, default=0)
     argparser.add_argument("--max_epoch", type=int, default=100)
-    argparser.add_argument("--n_e", type=int, default=1024)
+    argparser.add_argument("--n_e", type=int, default=0)
     argparser.add_argument("--n_d", "--d", type=int, default=2048)
     argparser.add_argument("--n_proj", type=int, default=512)
-    argparser.add_argument("--div_val", type=float, default=4)
+    argparser.add_argument("--div_val", type=float, default=2)
     argparser.add_argument("--dropout", type=float, default=0.1,
         help="dropout probability"
     )
-    argparser.add_argument("--dropout_e", type=float, default=0.1)
     argparser.add_argument("--bias", type=float, default=-3,
         help="intial bias of highway gates",
     )
-    argparser.add_argument("--depth", type=int, default=12)
-    argparser.add_argument("--lr", type=float, default=2)
+    argparser.add_argument("--depth", type=int, default=6)
+    argparser.add_argument("--lr", type=float, default=0.00025)
     argparser.add_argument("--weight_decay", type=float, default=0)
     argparser.add_argument("--clip_grad", type=float, default=0.3)
     argparser.add_argument("--log_period", type=int, default=1000000)
@@ -467,7 +428,6 @@ if __name__ == "__main__":
     argparser.add_argument("--prune_init_mean", type=float, default=0.1)
     argparser.add_argument("--prune_start_epoch", type=int, default=0)
 
-    argparser.add_argument("--local_rank", type=int, default=0)
     args = argparser.parse_args()
     print (args)
     main(args)

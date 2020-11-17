@@ -3,7 +3,6 @@ from copy import deepcopy
 
 import torch.nn as nn
 
-from flambe.logging import log_histogram
 from flop.hardconcrete import HardConcrete
 from flop.linear import (
     ProjectedLinear,
@@ -75,7 +74,7 @@ def make_hard_concrete(
         elif isinstance(child, nn.Linear):
             modules.append((name, child))
         else:
-            make_hard_concrete(child, in_place)
+            make_hard_concrete(child, in_place, init_mean, init_std)
 
     # Replace all modules found
     new_module = module if in_place else deepcopy(module)
@@ -255,12 +254,3 @@ def get_num_prunable_params(modules) -> int:
 
 def get_num_params(modules, train=True) -> int:
     return sum([module.num_parameters(train) for module in modules])
-
-
-def log_masks(model, masks, step):
-    masks = [mask() for mask in masks]
-    mask_names = [i[0] for i in model.named_parameters() if "log_alpha" in i[0]]
-    alphas = [i[1] for i in model.named_parameters() if "log_alpha" in i[0]]
-    for name, log_alpha, mask in zip(mask_names, alphas, masks):
-        log_histogram(name, log_alpha.detach().cpu().numpy(), step, bins="sqrt")
-        log_histogram(name + ".mask", mask.detach().cpu().numpy(), step, bins="sqrt")

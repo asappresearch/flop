@@ -52,12 +52,6 @@ from flop import make_hard_concrete
 model = make_hard_concrete(model)
 ```
 
-## Usage in Flambe
-
-If you are using Flambe to train your models, then you could simply use the provided
-``HardConcreteTrainer``, which will apply the ``make_hard_concrete`` method on your input
-module, and perform training.
-
 ## Replicate results from the paper
 
 To replicate the SRU numbers, please look at the script ``examples/train_enwik8.py``.

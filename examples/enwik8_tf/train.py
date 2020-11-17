@@ -619,7 +619,7 @@ def train():
 
             # Save the model if the validation loss is the best we've seen so far.
             if not best_val_loss or val_loss < best_val_loss:
-                if not args.debug:
+                if (not args.debug) and ((not args.prune) or sparsity > args.prune_sparsity - 0.02):
                     with open(os.path.join(args.work_dir, 'model.pt'), 'wb') as f:
                         torch.save(model, f)
                     with open(os.path.join(args.work_dir, 'state_dict.pt'), 'wb') as f:
