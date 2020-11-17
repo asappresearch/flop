@@ -5,7 +5,7 @@ from collections import Counter, OrderedDict
 import numpy as np
 import torch
 
-from utils.vocabulary import Vocab
+from flop.scripts.enwik8_tf.utils.vocabulary import Vocab
 
 class LMOrderedIterator(object):
     def __init__(self, data, bsz, bptt, device='cpu', ext_len=None):

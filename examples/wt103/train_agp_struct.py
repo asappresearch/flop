@@ -1,31 +1,21 @@
 import sys
-import os
 import argparse
 import time
 import random
 import math
+import os
+import zipfile
 
 import numpy as np
 import torch
 import torch.nn as nn
-import torch.nn.functional as F
-from torch.nn.init import xavier_uniform_
-from torch.optim import Adam
 from tensorboardX import SummaryWriter
 
 import sru
 import flop
 from flop.embedding import AdaptiveEmbedding, AdaptiveLogSoftmax
-from flop.embedding import HardConcreteAdaptiveEmbedding, HardConcreteAdaptiveLogSoftmax
+from flop.embedding import AdaptiveEmbeddingWithMask, AdaptiveLogSoftmaxWithMask
 from .utils.data_utils import get_lm_corpus
-
-
-class CustomLinear(nn.Linear):
-    def __init__(self, in_features, out_features, bias=False):
-        super(CustomLinear, self).__init__(in_features, out_features, bias=bias)
-
-    def forward(self, data, **kwargs):
-        return super().forward(data)
 
 
 class Model(nn.Module):
@@ -52,11 +42,14 @@ class Model(nn.Module):
             self.n_d,
             self.n_d,
             self.depth,
+            projection_size=args.n_proj,
             dropout=args.dropout,
             highway_bias=args.bias,
             layer_norm=args.layer_norm,
             rescale=args.rescale,
-            custom_m=CustomLinear(self.n_d, self.n_d * 3, bias=False),
+            custom_m=flop.ProjectedLinear(
+                self.n_d, self.n_d * 3, proj_features=args.n_proj, bias=False
+            ),
         )
         self.output_layer = AdaptiveLogSoftmax(
             self.n_V,
@@ -168,9 +161,9 @@ def main(args):
         dev_writer = SummaryWriter(log_dir=log_path + "/dev")
 
     # set up distributed training
-    torch.cuda.set_device(args.local_rank)
-    device = torch.device("cuda", args.local_rank)
-    torch.distributed.init_process_group(backend="nccl")
+    # torch.cuda.set_device(args.local_rank)
+    device = 'cuda'
+    # torch.distributed.init_process_group(backend="nccl")
     set_seed(1234)
     args.n_gpu = 1
     args.device = device
@@ -184,16 +177,12 @@ def main(args):
     eval_unroll_size = args.eval_unroll_size
     batch_size = args.batch_size
     eval_batch_size = args.eval_batch_size
-    n_nodes = torch.cuda.device_count()
-    train = corpus.get_distributed_iterator(
-        "train",
-        batch_size,
-        unroll_size,
-        n_nodes=n_nodes,
-        rank=local_rank,
-        device=device,
-    )
-    dev = corpus.get_iterator("valid", eval_batch_size, eval_unroll_size, device=device)
+    # n_nodes = torch.cuda.device_count()
+    # train = corpus.get_distributed_iterator('train', batch_size,
+    #                                         unroll_size, n_nodes=n_nodes,
+    #                                         rank=local_rank, device=device)
+    train = corpus.get_iterator("train", batch_size, unroll_size, device=device)
+    dev = corpus.get_iterator("test", eval_batch_size, eval_unroll_size, device=device)
     if local_rank == 0:
         print("vocab size: {}".format(n_token))
 
@@ -203,45 +192,55 @@ def main(args):
     lr = 1.0 if not args.noam else 1.0 / (args.n_d ** 0.5) / (args.warmup_steps ** 1.5)
     if args.prune:
         # in place substituion of linear ops in SRU
-        flop.make_hard_concrete(
-            model.rnn, in_place=True, init_mean=args.prune_init_mean
+        flop.make_projected_linear_with_mask(
+            model.rnn, in_place=True
         )
-        model.embedding_layer = HardConcreteAdaptiveEmbedding.from_module(
-            model.embedding_layer, init_mean=args.prune_init_mean
+        model.embedding_layer = AdaptiveEmbeddingWithMask.from_module(
+            model.embedding_layer
         )
-        model.output_layer = HardConcreteAdaptiveLogSoftmax.from_module(
-            model.output_layer, init_mean=args.prune_init_mean
+        model.output_layer = AdaptiveLogSoftmaxWithMask.from_module(
+            model.output_layer
         )
         # tie weights again
         model.tie_weights()
         model.to(device)
-        hc_modules = flop.get_hardconcrete_modules(
-            model.rnn
-        ) + flop.get_hardconcrete_modules(model.embedding_layer)
-        # print(len(flop.get_hardconcrete_modules(model)))
-        # print(len(hc_modules))
-        hc_parameters = [
-            p for m in hc_modules for p in m.parameters() if p.requires_grad
-        ]
-        optimizer_hc = torch.optim.Adam(
-            hc_parameters, lr=lr * args.prune_lr, weight_decay=0
-        )
+        mask_params = list(flop.get_projected_linear_masks(model.rnn))
+        for param in model.embedding_layer.masks:
+            mask_params.append(param)
 
-        lambda_1 = nn.Parameter(torch.tensor(0.0).cuda())
-        lambda_2 = nn.Parameter(torch.tensor(0.0).cuda())
-        optimizer_max = torch.optim.Adam([lambda_1, lambda_2], lr=lr, weight_decay=0)
-        optimizer_max.param_groups[0]["lr"] = -lr * args.prune_lr
-        hc_linear_modules = flop.get_hardconcrete_linear_modules(model) + [
+        optimizer_pm = torch.optim.Adam(mask_params, lr=lr * args.prune_lr, weight_decay=0)
+
+        mask_modules = flop.get_projected_linear_with_mask_modules(model) + [
             model.embedding_layer
         ]
 
-        num_hardconcrete_params = sum(x.numel() for x in hc_parameters)
+        num_mask_params = sum(x.numel() for x in mask_params)
         num_prunable_params = sum(
-            m.num_prunable_parameters() for m in hc_linear_modules
+            m.num_prunable_parameters() for m in mask_modules
         )
         if local_rank == 0:
-            print("num of hardconcrete paramters: {}".format(num_hardconcrete_params))
-            print("num of prunable paramters: {}".format(num_prunable_params))
+            print("num of mask parameters: {}".format(num_mask_params))
+            print("num of prunable parameters: {}".format(num_prunable_params))
+
+        mask_param_names = [
+            i[0]
+            for i in model.named_parameters()
+            if i[1].requires_grad and "mask" in i[0]
+        ]
+        pruner = flop.NervanaPruner(
+            model,
+            subpruners={
+                "agppruner": {
+                    "class": "AutomatedGradualPruner",
+                    "initial_sparsity": 0.05,
+                    "weights": mask_param_names,
+                    "final_sparsity": args.prune_sparsity,
+                    "starting_step": args.prune_start_epoch + 1,
+                    "ending_step": args.prune_end_epoch,
+                    "frequency": 1,
+                }
+            },
+        )
     else:
         model.to(device)
         args.prune_start_epoch = args.max_epoch
@@ -249,17 +248,16 @@ def main(args):
     m_parameters = [
         i[1]
         for i in model.named_parameters()
-        if i[1].requires_grad and "log_alpha" not in i[0]
+        if i[1].requires_grad and "mask" not in i[0]
     ]
-    optimizer = torch.optim.Adam(
-        m_parameters, lr=lr * args.lr, weight_decay=args.weight_decay
-    )
+    optimizer = torch.optim.Adam(m_parameters, lr=lr * args.lr, weight_decay=args.weight_decay)
     num_params = sum(x.numel() for x in m_parameters if x.requires_grad)
 
     model_ = model
-    model = torch.nn.parallel.DistributedDataParallel(
-        model, dim=1, device_ids=[local_rank], output_device=local_rank,
-    )
+    model = nn.DataParallel(model, dim=1).to('cuda')
+    # model = torch.nn.parallel.DistributedDataParallel(
+    #     model, dim=1, device_ids=[local_rank], output_device=local_rank,
+    # )
 
     nbatch = 1
     niter = 1
@@ -275,52 +273,54 @@ def main(args):
 
     model.zero_grad()
     if args.prune:
-        optimizer_max.zero_grad()
-        optimizer_hc.zero_grad()
+        optimizer_pm.zero_grad()
 
     for epoch in range(args.max_epoch):
         start_time = time.time()
         model.train()
-        total_loss = 0.0
         hidden = model_.init_hidden(batch_size)
         start_prune = epoch >= args.prune_start_epoch
         i = 0
 
+        pruner.begin_step(epoch)
         for x, y, seq_len in train:
+            # start iter on the first batch
+            if nbatch % args.update_param_freq == 1:
+                pruner.begin_iter(epoch, niter, N // args.update_param_freq)
+
             i += 1
             hidden.detach_()
 
             # language model forward and backward
-            loss, hidden = model(x, y, hidden)
-            loss = loss.mean()
-            (loss / args.update_param_freq).backward()
-            loss = loss.item()
-            lagrangian_loss = 0
-            target_sparsity = 0
+            model_loss, hidden = model(x, y, hidden)
+            l1_loss = 0
             expected_sparsity = 0
 
             # add lagrangian loss (regularization) when pruning
             if start_prune:
-                # compute target sparsity with (optionally) linear warmup
-                target_sparsity = args.prune_sparsity
-                if args.prune_warmup > 0:
-                    niter_ = niter - args.prune_start_epoch * N
-                    target_sparsity *= min(1.0, niter_ / args.prune_warmup)
-
                 # compute expected model size and sparsity
                 expected_size = sum(
-                    m.num_parameters(train=True) for m in hc_linear_modules
+                    m.num_parameters(train=True) for m in mask_modules
                 )
                 expected_sparsity = 1.0 - expected_size / num_prunable_params
-
-                # compute lagrangian loss
-                lagrangian_loss = (
-                    lambda_1 * (expected_sparsity - target_sparsity)
-                    + lambda_2 * (expected_sparsity - target_sparsity) ** 2
-                )
-                (lagrangian_loss / args.update_param_freq).backward()
                 expected_sparsity = expected_sparsity.item()
-                lagrangian_loss = lagrangian_loss.item()
+
+                l1_loss_aggr = 0
+                if args.l1_lambda > 0 and expected_sparsity < args.prune_sparsity:
+                    for p in mask_params:
+                        l1_loss_aggr += torch.sum(torch.abs(p))
+
+                l1_loss = args.l1_lambda * l1_loss_aggr
+
+            model_loss = model_loss.mean()
+            if args.l1_lambda > 0:
+                loss = model_loss + l1_loss
+            else:
+                loss = model_loss
+
+            (loss / args.update_param_freq).backward()
+            model_loss = model_loss.item()
+            l1_loss = l1_loss.item() if isinstance(l1_loss, torch.Tensor) else l1_loss
 
             #  log training stats
             if (
@@ -333,33 +333,20 @@ def main(args):
                         "sparsity/expected_sparsity", expected_sparsity, niter
                     )
                     train_writer.add_scalar(
-                        "sparsity/target_sparsity", target_sparsity, niter
+                        "loss/l1_loss", l1_loss, niter
                     )
-                    train_writer.add_scalar(
-                        "loss/lagrangian_loss", lagrangian_loss, niter
-                    )
-                    train_writer.add_scalar("lambda/1", lambda_1.item(), niter)
-                    train_writer.add_scalar("lambda/2", lambda_2.item(), niter)
-                    if (nbatch - 1) % 3000 == 0:
-                        for index, layer in enumerate(hc_modules):
-                            train_writer.add_histogram(
-                                "log_alpha/{}".format(index),
-                                layer.log_alpha,
-                                niter,
-                                bins="sqrt",
-                            )
                 sys.stderr.write(
                     "\r{:.4f} {:.2f} {:.2f} eta={:.1f}m".format(
-                        math.exp(loss),
-                        lagrangian_loss,
+                        math.exp(model_loss),
+                        l1_loss,
                         expected_sparsity,
                         (time.time() - start_time) / 60.0 / (i + 1) * (N - i - 1),
                     )
                 )
-                train_writer.add_scalar("loss/ppl", math.exp(loss), niter)
-                train_writer.add_scalar("loss/lm_loss", loss, niter)
+                train_writer.add_scalar("loss/ppl", math.exp(model_loss), niter)
+                train_writer.add_scalar("loss/lm_loss", model_loss, niter)
                 train_writer.add_scalar(
-                    "loss/total_loss", loss + lagrangian_loss, niter
+                    "loss/total_loss", model_loss + l1_loss, niter
                 )
                 train_writer.add_scalar(
                     "parameter_norm", calc_norm([x.data for x in m_parameters]), niter
@@ -376,13 +363,14 @@ def main(args):
                     torch.nn.utils.clip_grad_norm(m_parameters, args.clip_grad)
                 optimizer.step()
                 if start_prune:
-                    optimizer_max.step()
-                    optimizer_hc.step()
+                    optimizer_pm.step()
                 #  clear gradient
                 model.zero_grad()
                 if args.prune:
-                    optimizer_max.zero_grad()
-                    optimizer_hc.zero_grad()
+                    optimizer_pm.zero_grad()
+
+                # End iter on the last batch
+                pruner.end_iter(epoch, niter, N // args.update_param_freq)
                 niter += 1
 
             if local_rank == 0 and (nbatch % args.log_period == 0 or i == N):
@@ -394,10 +382,12 @@ def main(args):
                 sparsity = 0
                 if args.prune:
                     pruned_size = sum(
-                        m.num_parameters(train=False) for m in hc_linear_modules
+                        m.num_parameters(train=False) for m in mask_modules
                     )
                     sparsity = 1.0 - pruned_size / num_prunable_params
+                    # agp_sparsity = pruner.get_step_logs()
                     dev_writer.add_scalar("sparsity/hard_sparsity", sparsity, niter)
+                    # dev_writer.add_scalar("sparsity/agp_sparsity", agp_sparsity, niter)
                     dev_writer.add_scalar(
                         "model_size/total_prunable", num_prunable_params, niter
                     )
@@ -432,10 +422,7 @@ def main(args):
                         elapsed_time,
                     )
                 )
-                if dev_ppl < best_dev:
-                    if (not args.prune) or sparsity > args.prune_sparsity - 0.02:
-                        best_dev = dev_ppl
-                        checkpoint = copy_model(model_)
+                checkpoint = copy_model(model_)
                 sys.stdout.write("\n")
                 sys.stdout.flush()
 
@@ -446,13 +433,19 @@ def main(args):
             if args.noam and start_prune:
                 niter_ = niter - args.prune_start_epoch * N
                 lr = min(1.0 / (niter_ ** 0.5), niter_ / (args.warmup_steps ** 1.5))
-                optimizer_max.param_groups[0]["lr"] = (
-                    -lr * args.prune_lr / (args.n_d ** 0.5)
-                )
-                optimizer_hc.param_groups[0]["lr"] = lr * args.lr / (args.n_d ** 0.5)
+                optimizer_pm.param_groups[0]["lr"] = lr * args.lr / (args.n_d ** 0.5)
 
-        if local_rank == 0 and args.save and checkpoint is not None:
-            torch.save(checkpoint, "{}.pt".format(args.save,))
+        pruner.end_step(epoch)
+        if local_rank == 0 and args.save and (epoch + 1) % 10 == 0:
+            torch.save(
+                checkpoint,
+                "{}.{}.{}.pt".format(
+                    args.save,
+                    epoch + 1,
+                    int(dev_ppl)
+                    # sparsity
+                ),
+            )
 
     if local_rank == 0:
         train_writer.close()
@@ -473,15 +466,15 @@ def main(args):
 
 if __name__ == "__main__":
     argparser = argparse.ArgumentParser(sys.argv[0], conflict_handler="resolve")
-    argparser.add_argument("--log", type=str, required=True)
-    argparser.add_argument("--noam", action="store_true")
+    argparser.add_argument("--log", type=str, default="")
+    argparser.add_argument("--noam", type=bool, default=True)
     argparser.add_argument("--warmup_steps", type=int, default=4000)
-    argparser.add_argument("--layer_norm", action="store_true")
+    argparser.add_argument("--layer_norm", type=bool, default=True)
     argparser.add_argument("--rescale", action="store_true")
     argparser.add_argument("--not_tie", action="store_true")
     argparser.add_argument("--data", type=str, required=True, help="training file")
-    argparser.add_argument("--update_param_freq", type=int, default=1)
-    argparser.add_argument("--batch_size", "--batch", type=int, default=24)
+    argparser.add_argument("--update_param_freq", type=int, default=2)
+    argparser.add_argument("--batch_size", "--batch", type=int, default=32)
     argparser.add_argument("--eval_batch_size", type=int, default=10)
     argparser.add_argument("--unroll_size", type=int, default=256)
     argparser.add_argument("--eval_unroll_size", type=int, default=0)
@@ -499,21 +492,27 @@ if __name__ == "__main__":
     )
     argparser.add_argument("--depth", type=int, default=12)
     argparser.add_argument("--lr", type=float, default=2)
-    argparser.add_argument("--weight_decay", type=float, default=0)
+    argparser.add_argument("--weight_decay", type=float, default=0.01)
     argparser.add_argument("--clip_grad", type=float, default=0.3)
     argparser.add_argument("--log_period", type=int, default=1000000)
     argparser.add_argument("--save", type=str, default="")
     argparser.add_argument("--load", type=str, default="")
 
-    argparser.add_argument("--prune", action="store_true")
-    argparser.add_argument("--prune_lr", type=float, default=5)
-    argparser.add_argument("--prune_beta", type=float, default=1)
-    argparser.add_argument("--prune_warmup", type=int, default=64000)
-    argparser.add_argument("--prune_sparsity", type=float, default=0.8)
-    argparser.add_argument("--prune_init_mean", type=float, default=0.5)
+    argparser.add_argument("--prune", type=bool, default=True)
+    argparser.add_argument("--prune_lr", type=float, default=2)
+    argparser.add_argument("--prune_warmup", type=int, default=0)
     argparser.add_argument("--prune_start_epoch", type=int, default=0)
+    argparser.add_argument("--prune_sparsity", type=float, default=0.8)
+    argparser.add_argument("--prune_end_epoch", type=int, default=30)
+    argparser.add_argument("--l1_lambda", type=float, default=0)
 
     argparser.add_argument("--local_rank", type=int, default=0)
     args = argparser.parse_args()
+    dirname = os.path.dirname(args.data)
+    with zipfile.ZipFile(args.data, 'r') as f:
+        f.extractall(dirname)
+    args.data = os.path.join(dirname, 'wikitext-103')
+    os.makedirs(args.log, exist_ok=True)
+    os.makedirs(args.save, exist_ok=True)
     print(args)
     main(args)

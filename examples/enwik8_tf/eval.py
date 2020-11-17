@@ -6,9 +6,9 @@ import os, sys
 
 import torch
 
-from data_utils import get_lm_corpus
-from mem_transformer import MemTransformerLM
-from utils.exp_utils import get_logger
+from flop.scripts.enwik8_tf.data_utils import get_lm_corpus
+from flop.scripts.enwik8_tf.mem_transformer import MemTransformerLM
+from flop.scripts.enwik8_tf.utils.exp_utils import get_logger
 
 parser = argparse.ArgumentParser(description='PyTorch Transformer Language Model')
 parser.add_argument('--data', type=str, default='../data/wikitext-103',
@@ -83,6 +83,12 @@ def evaluate(eval_iter):
             break
 
     # Turn on evaluation mode which disables dropout.
+    with torch.no_grad():
+        model.train()
+        mems = tuple()
+        for i, (data, target, seq_len) in enumerate(eval_iter):
+            ret = model(data, target, *mems)
+            break
     model.eval()
     total_len, total_loss = 0, 0.
     start_time = time.time()

@@ -1,3 +1,4 @@
+import os
 import sys
 import argparse
 import time
@@ -149,7 +150,7 @@ def main(args):
     train, dev, test, words = read_corpus(args.data)
     dev_, test_ = dev, test
     train = create_batches(train, args.batch_size)
-    dev = create_batches(dev, args.batch_size)
+    dev = create_batches(test, args.batch_size)
     test = create_batches(test, args.batch_size)
 
     model = Model(words, args)
@@ -161,34 +162,38 @@ def main(args):
 
     lr = 1.0 if not args.noam else 1.0 / (args.n_d ** 0.5) / (args.warmup_steps ** 1.5)
     if args.prune:
-        # in place substituion of linear ops in SRU
-        flop.make_hard_concrete(model.rnn, in_place=True)
         model.cuda()
-        print("model after inserting hardconcrete:")
         print(model)
-        hc_modules = flop.get_hardconcrete_modules(model)
-        hc_parameters = [
-            p for m in hc_modules for p in m.parameters() if p.requires_grad
+        num_mask_params = sum(x.numel() for x in model.rnn.parameters())
+        num_prunable_params = num_mask_params
+        print("num of mask parameters: {}".format(num_mask_params))
+        print("num of prunable parameters: {}".format(num_prunable_params))
+        param_names = [
+            i[0]
+            for i in model.rnn.named_parameters()
+            if i[1].requires_grad
         ]
-        optimizer_hc = Adam(hc_parameters, lr=lr * args.prune_lr, weight_decay=0)
-        num_hardconcrete_params = sum(x.numel() for x in hc_parameters)
-        print("num of hardconcrete paramters: {}".format(num_hardconcrete_params))
-        lambda_1 = nn.Parameter(torch.tensor(0.0).cuda())
-        lambda_2 = nn.Parameter(torch.tensor(0.0).cuda())
-        optimizer_max = Adam([lambda_1, lambda_2], lr=lr, weight_decay=0)
-        optimizer_max.param_groups[0]["lr"] = -lr * args.prune_lr
-        hc_linear_modules = flop.get_hardconcrete_linear_modules(model)
-        num_prunable_params = sum(
-            m.num_prunable_parameters() for m in hc_linear_modules
+        pruner = flop.NervanaPruner(
+            model.rnn,
+            subpruners={
+                "agppruner": {
+                    "class": "AutomatedGradualPruner",
+                    "initial_sparsity": 0.05,
+                    "weights": param_names,
+                    "final_sparsity": args.prune_sparsity,
+                    "starting_step": args.prune_start_epoch,
+                    "ending_step": args.prune_end_epoch,
+                    "frequency": 1,
+                }
+            },
         )
-        print("num of prunable paramters: {}".format(num_prunable_params))
     else:
         args.prune_start_epoch = args.max_epoch
 
     m_parameters = [
         i[1]
         for i in model.named_parameters()
-        if i[1].requires_grad and "log_alpha" not in i[0]
+        if i[1].requires_grad
     ]
     optimizer = Adam(m_parameters, lr=lr * args.lr, weight_decay=args.weight_decay)
     num_params = sum(x.numel() for x in m_parameters if x.requires_grad)
@@ -203,84 +208,38 @@ def main(args):
     criterion = nn.CrossEntropyLoss()
 
     model.zero_grad()
-    if args.prune:
-        optimizer_max.zero_grad()
-        optimizer_hc.zero_grad()
 
     for epoch in range(args.max_epoch):
         start_time = time.time()
         model.train()
         hidden = model.init_hidden(batch_size)
-        start_prune = epoch >= args.prune_start_epoch
 
+        pruner.begin_step(epoch)
         for i in range(N):
+            # start iter on the first batch
+            if nbatch % args.update_param_freq == 1:
+                pruner.begin_iter(epoch, niter, N // args.update_param_freq)
+
             x = train[0][i * unroll_size : (i + 1) * unroll_size]
             y = train[1][i * unroll_size : (i + 1) * unroll_size].view(-1)
             hidden.detach_()
 
             # language model forward and backward
             output, hidden = model(x, hidden)
-            loss = criterion(output, y)
+            model_loss = criterion(output, y)
+
+            loss = model_loss
             (loss / args.update_param_freq).backward()
-            loss = loss.item()
-            lagrangian_loss = 0
-            target_sparsity = 0
-            expected_sparsity = 0
-
-            # add lagrangian loss (regularization) when pruning
-            if start_prune:
-                # compute target sparsity with (optionally) linear warmup
-                target_sparsity = args.prune_sparsity
-                if args.prune_warmup > 0:
-                    niter_ = niter - args.prune_start_epoch * N
-                    target_sparsity *= min(1.0, niter_ / args.prune_warmup)
-
-                # compute expected model size and sparsity
-                expected_size = sum(
-                    m.num_parameters(train=True) for m in hc_linear_modules
-                )
-                expected_sparsity = 1.0 - expected_size / num_prunable_params
-
-                # compute lagrangian loss
-                lagrangian_loss = (
-                    lambda_1 * (expected_sparsity - target_sparsity)
-                    + lambda_2 * (expected_sparsity - target_sparsity) ** 2
-                )
-                (lagrangian_loss / args.update_param_freq).backward()
-                expected_sparsity = expected_sparsity.item()
-                lagrangian_loss = lagrangian_loss.item()
+            model_loss = model_loss.item()
 
             #  log training stats
             if (niter - 1) % 100 == 0 and nbatch % args.update_param_freq == 0:
-                if args.prune:
-                    train_writer.add_scalar(
-                        "sparsity/expected_sparsity", expected_sparsity, niter
-                    )
-                    train_writer.add_scalar(
-                        "sparsity/target_sparsity", target_sparsity, niter
-                    )
-                    train_writer.add_scalar(
-                        "loss/lagrangian_loss", lagrangian_loss, niter
-                    )
-                    train_writer.add_scalar("lambda/1", lambda_1.item(), niter)
-                    train_writer.add_scalar("lambda/2", lambda_2.item(), niter)
-                    if (niter - 1) % 3000 == 0:
-                        for index, layer in enumerate(hc_modules):
-                            train_writer.add_histogram(
-                                "log_alpha/{}".format(index),
-                                layer.log_alpha,
-                                niter,
-                                bins="sqrt",
-                            )
                 sys.stderr.write(
-                    "\r{:.4f} {:.2f} {:.2f}".format(
-                        loss, lagrangian_loss, expected_sparsity,
+                    "\r{:.4f}".format(
+                        model_loss,
                     )
                 )
-                train_writer.add_scalar("loss/lm_loss", loss, niter)
-                train_writer.add_scalar(
-                    "loss/total_loss", loss + lagrangian_loss, niter
-                )
+                train_writer.add_scalar("loss/lm_loss", model_loss, niter)
                 train_writer.add_scalar(
                     "parameter_norm", calc_norm([x.data for x in m_parameters]), niter
                 )
@@ -295,14 +254,11 @@ def main(args):
                 if args.clip_grad > 0:
                     torch.nn.utils.clip_grad_norm(m_parameters, args.clip_grad)
                 optimizer.step()
-                if start_prune:
-                    optimizer_max.step()
-                    optimizer_hc.step()
                 #  clear gradient
                 model.zero_grad()
-                if args.prune:
-                    optimizer_max.zero_grad()
-                    optimizer_hc.zero_grad()
+
+                # End iter on the last batch
+                pruner.end_iter(epoch, niter, N // args.update_param_freq)
                 niter += 1
 
             if nbatch % args.log_period == 0 or i == N - 1:
@@ -312,23 +268,13 @@ def main(args):
                 dev_writer.add_scalar("bpc", np.log2(dev_ppl), niter)
                 sparsity = 0
                 if args.prune:
-                    pruned_size = sum(
-                        m.num_parameters(train=False) for m in hc_linear_modules
-                    )
-                    sparsity = 1.0 - pruned_size / num_prunable_params
-                    dev_writer.add_scalar("sparsity/hard_sparsity", sparsity, niter)
+                    agp_sparsity = pruner.get_step_logs()['sparsity']
+                    dev_writer.add_scalar("sparsity/hard_sparsity", agp_sparsity, niter)
+                    # dev_writer.add_scalar("sparsity/agp_sparsity", agp_sparsity, niter)
                     dev_writer.add_scalar(
                         "model_size/total_prunable", num_prunable_params, niter
                     )
-                    dev_writer.add_scalar(
-                        "model_size/current_prunable", pruned_size, niter
-                    )
                     dev_writer.add_scalar("model_size/total", num_params, niter)
-                    dev_writer.add_scalar(
-                        "model_size/current",
-                        num_params - num_prunable_params + pruned_size,
-                        niter,
-                    )
                 sys.stdout.write(
                     "\rIter={}  lr={:.5f}  train_loss={:.4f}  dev_loss={:.4f}"
                     "  dev_bpc={:.2f}  sparsity={:.2f}\teta={:.1f}m\t[{:.1f}m]\n".format(
@@ -342,10 +288,8 @@ def main(args):
                         elapsed_time,
                     )
                 )
-                if dev_ppl < best_dev:
-                    if (not args.prune) or sparsity > args.prune_sparsity - 0.02:
-                        best_dev = dev_ppl
-                        checkpoint = copy_model(model)
+
+                checkpoint = copy_model(model)
                 sys.stdout.write("\n")
                 sys.stdout.flush()
 
@@ -353,14 +297,8 @@ def main(args):
             if args.noam:
                 lr = min(1.0 / (niter ** 0.5), niter / (args.warmup_steps ** 1.5))
                 optimizer.param_groups[0]["lr"] = lr * args.lr / (args.n_d ** 0.5)
-            if args.noam and start_prune:
-                niter_ = niter - args.prune_start_epoch * N
-                lr = min(1.0 / (niter_ ** 0.5), niter_ / (args.warmup_steps ** 1.5))
-                optimizer_max.param_groups[0]["lr"] = (
-                    -lr * args.prune_lr / (args.n_d ** 0.5)
-                )
-                optimizer_hc.param_groups[0]["lr"] = lr * args.lr / (args.n_d ** 0.5)
 
+        pruner.end_step(epoch)
         if args.save and (epoch + 1) % 10 == 0:
             torch.save(copy_model(model), "{}.{}.{:.3f}.pt".format(
                 args.save,
@@ -384,8 +322,8 @@ def main(args):
 
 if __name__ == "__main__":
     argparser = argparse.ArgumentParser(sys.argv[0], conflict_handler="resolve")
-    argparser.add_argument("--log", type=str, required=True)
-    argparser.add_argument("--noam", action="store_true")
+    argparser.add_argument("--log", type=str, default="")
+    argparser.add_argument("--noam", type=bool, default=True)
     argparser.add_argument("--warmup_steps", type=int, default=16000)
     argparser.add_argument("--layer_norm", action="store_true")
     argparser.add_argument("--rescale", action="store_true")
@@ -411,12 +349,13 @@ if __name__ == "__main__":
     argparser.add_argument("--save", type=str, default="")
     argparser.add_argument("--load", type=str, default="")
 
-    argparser.add_argument("--prune", action="store_true")
-    argparser.add_argument("--prune_lr", type=float, default=3)
+    argparser.add_argument("--prune", type=bool, default=True)
+    argparser.add_argument("--prune_lr", type=float, default=2)
     argparser.add_argument("--prune_warmup", type=int, default=0)
-    argparser.add_argument("--prune_sparsity", type=float, default=0.0)
     argparser.add_argument("--prune_start_epoch", type=int, default=0)
+    argparser.add_argument("--prune_sparsity", type=float, default=0.9)
+    argparser.add_argument("--prune_end_epoch", type=int, default=30)
+    argparser.add_argument("--l1_lambda", type=float, default=0)
 
     args = argparser.parse_args()
-    print(args)
     main(args)

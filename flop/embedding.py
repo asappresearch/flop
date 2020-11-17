@@ -8,6 +8,7 @@ import torch.nn.functional as F
 
 from .hardconcrete import HardConcrete
 
+
 class AdaptiveEmbedding(nn.Module):
     '''
     Code taken and modified from Transformer-XL
@@ -192,6 +193,130 @@ class HardConcreteAdaptiveEmbedding(AdaptiveEmbedding):
                          dropout=dropout,
                          init_mean=init_mean,
                          init_std=init_std)
+
+        if keep_weights:
+            for i in range(len(module.cutoffs)):
+                new_module.emb_projs[i].data = module.emb_projs[i].data.clone()
+                new_module.emb_layers[i].weight.data = module.emb_layers[i].weight.data.clone()
+
+        return new_module
+
+
+class AdaptiveEmbeddingWithMask(AdaptiveEmbedding):
+    def __init__(self, n_token, d_embed, d_proj, cutoffs,
+                 div_val=1,
+                 div_freq=1,
+                 dropout=0.0,
+                 epsilon=1e-4):
+
+        super(AdaptiveEmbeddingWithMask, self).__init__(
+            n_token, d_embed, d_proj, cutoffs,
+            div_val=div_val,
+            div_freq=div_freq,
+            dropout=dropout
+        )
+
+        self.masks = nn.ParameterList()
+        for i in range(len(self.cutoffs)):
+            d_emb_i = self.emb_projs[i].size(1)
+            self.masks.append(nn.Parameter(torch.ones(d_emb_i)))
+
+        self.indices = None
+        self.compiled_projs = None
+        self.compiled_embeddings = None
+        self.epsilon = epsilon
+
+    def num_prunable_parameters(self) -> int:
+        """Get number of prunable parameters"""
+        return sum(l.weight.numel() for l in self.emb_layers) + \
+               sum(weight.numel() for weight in self.emb_projs)
+
+    def num_parameters(self, train=True) -> torch.Tensor:
+        """Get number of parameters."""
+        params = torch.tensor(0, dtype=torch.float).to(self.emb_projs[0])
+        if train:
+            for i in range(len(self.cutoffs)):
+                n_proj = (self.masks[i].data.abs() > self.epsilon).sum()
+                params += (self.emb_projs[i].size(0) + self.emb_layers[i].weight.size(0)) * n_proj
+        elif self.compiled_projs is not None and self.compiled_embeddings is not None:
+            for i in range(len(self.cutoffs)):
+                if len(self.indices[i]) == 0:
+                    warnings.warn("Mask is all zero in layer-{} AdaptiveEmbedding".format(i), RuntimeWarning)
+                else:
+                    params += self.compiled_projs[i].numel() + \
+                              self.compiled_embeddings[i].numel()
+        return params
+
+    def forward(self, inp, **kwargs):
+
+        embeddings = None
+        emb_projs = None
+
+        if self.training:
+            # Reset masks and compiled weights
+            self.compiled_projs = None
+            self.compiled_embeddings = None
+            self.indices = None
+        elif self.compiled_projs is not None:
+            embeddings = self.compiled_embeddings
+            emb_projs = self.compiled_projs
+
+        if embeddings is None:
+            indices = []
+            embeddings = []
+            emb_projs = []
+
+            # Sample mask and compute weights
+            for i in range(len(self.cutoffs)):
+                mask_i = (self.masks[i].data.abs() > self.epsilon)
+                indices_i = mask_i.data.nonzero().view(-1)
+                dim_i = self.emb_projs[i].size(1)
+
+                if len(indices_i) == 0:
+                    warnings.warn("Mask is all zero in AdaptiveEmbedding layer-{}".format(i), RuntimeWarning)
+
+                if len(indices_i) == 0 or len(indices_i) > dim_i * 0.8:
+                    embedding_i = self.emb_layers[i].weight * self.masks[i].view(1, -1)
+                    emb_proj_i = self.emb_projs[i]
+                else:
+                    embedding_i = self.emb_layers[i].weight * self.masks[i].view(1, -1)
+                    embedding_i = embedding_i.index_select(1, indices_i)
+                    emb_proj_i = self.emb_projs[i].index_select(1, indices_i)
+
+                indices.append(indices_i)
+                embeddings.append(embedding_i)
+                emb_projs.append(emb_proj_i)
+
+            if not self.training:
+                self.indices = indices
+                self.compiled_embeddings = embeddings
+                self.compiled_projs = emb_projs
+                # debug
+                #print("\n", [len(indices_i) for indices_i in self.indices])
+
+        return self._forward(inp, embeddings, emb_projs)
+
+    @classmethod
+    def from_module(cls,
+                    module: AdaptiveEmbedding,
+                    init_mean: float = 0.5,
+                    init_std: float = 0.01,
+                    keep_weights: bool = True,
+                    epsilon: float = 1e-4) -> 'AdaptiveEmbeddingWithMask':
+
+        n_token = module.n_token
+        d_embed = module.d_embed
+        d_proj = module.d_proj
+        cutoffs = module.cutoffs[:-1]
+        div_val = module.div_val
+        div_freq = module.div_freq
+        dropout = module.dropout.p
+
+        new_module = cls(n_token, d_embed, d_proj, cutoffs,
+                         div_val=div_val,
+                         div_freq=div_freq,
+                         dropout=dropout,
+                         epsilon=epsilon)
 
         if keep_weights:
             for i in range(len(module.cutoffs)):
@@ -448,6 +573,143 @@ class HardConcreteAdaptiveLogSoftmax(AdaptiveLogSoftmax):
                          keep_order=keep_order,
                          init_mean=init_mean,
                          init_std=init_std)
+
+        if keep_weights:
+            for i in range(len(module.cutoffs)):
+                new_module.out_projs[i].data = module.out_projs[i].data.clone()
+                new_module.out_layers[i].weight.data = module.out_layers[i].weight.data.clone()
+                new_module.out_layers[i].bias.data = module.out_layers[i].bias.data.clone()
+
+        return new_module
+
+
+class AdaptiveLogSoftmaxWithMask(AdaptiveLogSoftmax):
+    def __init__(self, n_token, d_embed, d_proj, cutoffs,
+                 div_val=1,
+                 div_freq=1,
+                 dropout=0.0,
+                 keep_order=True,
+                 epsilon=1e-4):
+
+        super(AdaptiveLogSoftmaxWithMask, self).__init__(
+            n_token, d_embed, d_proj, cutoffs,
+            div_val=div_val,
+            div_freq=div_freq,
+            dropout=dropout,
+            keep_order=keep_order
+        )
+
+        self.masks = nn.ParameterList()
+        for i in range(len(self.cutoffs)):
+            d_emb_i = self.out_projs[i].size(1)
+            self.masks.append(nn.Parameter(torch.ones(d_emb_i)))
+
+        self.indices = None
+        self.compiled_projs = None
+        self.compiled_embeddings = None
+        self.epsilon = epsilon
+
+    def num_prunable_parameters(self) -> int:
+        """Get number of prunable parameters"""
+        return sum(l.weight.numel() for l in self.out_layers) + \
+               sum(weight.numel() for weight in self.out_projs)
+
+    def num_parameters(self, train=True) -> torch.Tensor:
+        """Get number of parameters."""
+        params = torch.tensor(0, dtype=torch.float).to(self.out_projs[0])
+        if train:
+            for i in range(len(self.cutoffs)):
+                n_proj = (self.masks[i].data.abs() > self.epsilon).sum()
+                params += (self.out_projs[i].size(0) + self.out_layers[i].weight.size(0)) * n_proj
+        elif self.compiled_projs is not None and self.compiled_embeddings is not None:
+            for i in range(len(self.cutoffs)):
+                if len(self.indices[i]) == 0:
+                    warnings.warn("Mask is all zero in AdaptiveSoftmax layer-{}".format(i), RuntimeWarning)
+                else:
+                    params += self.compiled_projs[i].numel() + \
+                              self.compiled_embeddings[i].numel()
+        return params
+
+    def forward(self, hidden, target, keep_order=False, **kwargs):
+
+        if hidden.size(0) != target.size(0):
+            raise RuntimeError('Input and target should have the same size '
+                               'in the batch dimension.')
+
+        # construct weights and biases
+        biases = [l.bias for l in self.out_layers]
+        weights = None
+        out_projs = None
+
+        if self.training:
+            # Reset masks and compiled weights
+            self.compiled_projs = None
+            self.compiled_embeddings = None
+            self.indices = None
+        elif self.compiled_projs is not None:
+            weights = self.compiled_embeddings
+            out_projs = self.compiled_projs
+
+        if weights is None:
+            indices = []
+            weights = []
+            out_projs = []
+
+            # Sample mask and compute weights
+            for i in range(len(self.cutoffs)):
+                mask_i = (self.masks[i].data.abs() > self.epsilon)
+                indices_i = mask_i.data.nonzero().view(-1)
+                dim_i = self.out_projs[i].size(0)
+
+                if len(indices_i) == 0:
+                    warnings.warn("Mask is all zero in AdaptiveSoftmax layer-{}".format(i), RuntimeWarning)
+
+                if len(indices_i) == 0 or len(indices_i) > dim_i * 0.8:
+                    embedding_i = self.out_layers[i].weight * self.masks[i].view(1, -1)
+                    emb_proj_i = self.out_projs[i]
+                else:
+                    embedding_i = self.out_layers[i].weight * self.masks[i].view(1, -1)
+                    embedding_i = embedding_i.index_select(1, indices_i)
+                    emb_proj_i = self.out_projs[i].index_select(1, indices_i)
+
+                indices.append(indices_i)
+                weights.append(embedding_i)
+                out_projs.append(emb_proj_i)
+
+            if not self.training:
+                self.indices = indices
+                self.compiled_embeddings = weights
+                self.compiled_projs = out_projs
+                # debug
+                #print("\n", [len(indices_i) for indices_i in self.indices])
+
+        return self._forward(hidden, target,
+                             weights, biases, out_projs,
+                             keep_order=keep_order)
+
+    @classmethod
+    def from_module(cls,
+                    module: AdaptiveLogSoftmax,
+                    init_mean: float = 0.5,
+                    init_std: float = 0.01,
+                    keep_weights: bool = True,
+                    epsilon: float = 1e-4) -> 'AdaptiveLogSoftmaxWithMask':
+
+        n_token = module.n_token
+        d_embed = module.d_embed
+        d_proj = module.d_proj
+        cutoffs = module.cutoffs[:-1]
+        div_val = module.div_val
+        div_freq = module.div_freq
+        dropout = module.dropout.p
+        keep_order = module.keep_order
+
+        new_module = cls(n_token, d_embed, d_proj, cutoffs,
+                         div_val=div_val,
+                         div_freq=div_freq,
+                         dropout=dropout,
+                         keep_order=keep_order,
+                         epsilon=epsilon)
 
         if keep_weights:
             for i in range(len(module.cutoffs)):
