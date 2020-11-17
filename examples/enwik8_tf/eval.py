@@ -74,6 +74,14 @@ if args.same_length:
 # Evaluation code
 ###############################################################################
 def evaluate(eval_iter):
+    # Reset compiled masks and weights
+    with torch.no_grad():
+        model.train()
+        mems = tuple()
+        for i, (data, target, seq_len) in enumerate(eval_iter):
+            ret = model(data, target, *mems)
+            break
+
     # Turn on evaluation mode which disables dropout.
     model.eval()
     total_len, total_loss = 0, 0.

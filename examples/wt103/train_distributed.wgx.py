@@ -403,12 +403,9 @@ def main(args):
                 optimizer_max.param_groups[0]['lr'] = -lr * args.prune_lr / (args.n_d**0.5)
                 optimizer_hc.param_groups[0]['lr'] = lr * args.lr / (args.n_d**0.5)
 
-        if local_rank == 0 and args.save and (epoch + 1) % 10 == 0:
-            torch.save(copy_model(model_), "{}.{}.{}.pt".format(
+        if local_rank == 0 and args.save and checkpoint is not None:
+            torch.save(checkpoint, "{}.pt".format(
                 args.save,
-                epoch + 1,
-                int(dev_ppl)
-                #sparsity
             ))
 
     if local_rank == 0:
@@ -462,11 +459,11 @@ if __name__ == "__main__":
     argparser.add_argument("--load", type=str, default="")
 
     argparser.add_argument("--prune", action="store_true")
-    argparser.add_argument("--prune_lr", type=float, default=3)
+    argparser.add_argument("--prune_lr", type=float, default=5)
     argparser.add_argument("--prune_beta", type=float, default=1)
-    argparser.add_argument("--prune_warmup", type=int, default=0)
-    argparser.add_argument("--prune_sparsity", type=float, default=0.)
-    argparser.add_argument("--prune_init_mean", type=float, default=0.05)
+    argparser.add_argument("--prune_warmup", type=int, default=64000)
+    argparser.add_argument("--prune_sparsity", type=float, default=0.8)
+    argparser.add_argument("--prune_init_mean", type=float, default=0.5)
     argparser.add_argument("--prune_start_epoch", type=int, default=0)
 
     argparser.add_argument("--local_rank", type=int, default=0)
