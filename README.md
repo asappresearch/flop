@@ -1,7 +1,7 @@
 # FLOP
 
 Pytorch Library for L0 based pruning, as proposed in the paper:
-[Structured Pruning of Large Language Models](https://arxiv.org/abs/1910.04732)
+[Structured Pruning of Large Language Models](https://arxiv.org/abs/1910.04732)(EMNLP 2020)
 
 ## Install
 
@@ -59,10 +59,18 @@ To replicate the SRU numbers, please look at the script ``examples/train_enwik8.
 ## Cite
 
 ```sh
-@article{wang2019structured,
-  title={Structured Pruning of Large Language Models},
-  author={Wang, Ziheng and Wohlwend, Jeremy and Lei, Tao},
-  journal={arXiv preprint arXiv:1910.04732},
-  year={2019}
+@inproceedings{wang-etal-2020-structured,
+    title = "Structured Pruning of Large Language Models",
+    author = "Wang, Ziheng  and
+      Wohlwend, Jeremy  and
+      Lei, Tao",
+    booktitle = "Proceedings of the 2020 Conference on Empirical Methods in Natural Language Processing (EMNLP)",
+    month = nov,
+    year = "2020",
+    address = "Online",
+    publisher = "Association for Computational Linguistics",
+    url = "https://www.aclweb.org/anthology/2020.emnlp-main.496",
+    doi = "10.18653/v1/2020.emnlp-main.496",
+    pages = "6151--6162"
 }
 ```
