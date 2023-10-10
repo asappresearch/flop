@@ -1,4 +1,4 @@
 sru>=2.3.3
-GitPython==3.1.0
+GitPython==3.1.37
 scikit-learn==0.21.2
 setuptools>=41.0.0
